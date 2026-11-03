@@ -70,9 +70,9 @@ Setup.gs seedPaymentMethods() writes these rows and is safe to run twice. Each c
 | PK | CARD | Cheque card | 9581 | DP Groenewald | Pharma Karu Cheque | 3c6891b1-5d7f-49cb-9100-ce0d46ad7f11 |
 | HPB | CARD | Cheque card | 6358 | RG Duncan | HP Biotech Cheque | 5052e5c9-0411-4f1c-a509-62a0a802e833 |
 | NHP | CASH | Petty cash | | custodian TBC | Petty Cash | 618f8bfe-9d39-4572-a38f-3637884ebb45 |
-| PK | CASH | Petty cash | | custodian TBC | Petty Cash (to be created) | resolve in Stage 1 |
-| HPB | CASH | Petty cash | | custodian TBC | Petty Cash (to be created) | resolve in Stage 1 |
-Each company has one cash float. Pharma Karu and HP Biotech have no Petty Cash bank account in Xero yet; Stage 1 looks it up by name once it exists. Ignore HPB's bank account named "UNUSED".
+| PK | CASH | Petty cash | | custodian TBC | Pharma Karu Petty Cash | 4016c0c3-7f48-45f0-b0e1-7ff3e3c4524e |
+| HPB | CASH | Petty cash | | custodian TBC | HP Biotech Petty Cash | fc8f7e76-94bd-4871-9076-a53bc4ae8ef7 |
+Each company has one cash float. Bank accounts (cards and cash floats) are matched by AccountID, never by name, because the names differ per company. Ignore HPB's bank account named "UNUSED".
 
 ## Seed data: first admin
 Setup.gs seedAdmin() creates the only user before go-live: Dawid Groenewald, dawie@nhpglobalgroup.com, role admin, active, with can_buy and can_approve for HPB, NHP and PK. po_limit_zar: ask Dawie before seeding. Everyone else is added on the People screen. Dawie sets his own PIN by running setPin() once from the Apps Script editor; never write a PIN into the repo, a file or a log.
