@@ -149,3 +149,72 @@ function seedPaymentMethods() {
   console.log('seedPaymentMethods: added ' + added.length + (added.length ? ' ' + JSON.stringify(added) : '') + '; filled ' + filled.length);
   return { added: added, filled: filled };
 }
+
+// --- Stage 2: nightly sync trigger ------------------------------------------------------------
+
+/** Installs exactly one daily syncAll trigger at 02:00 SAST. Safe to run twice: old ones are removed first. */
+function installSyncTrigger() {
+  const removed = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'syncAll');
+  removed.forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('syncAll').timeBased().atHour(2).everyDays(1).inTimezone(APP.TZ).create();
+  const now = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'syncAll').length;
+  console.log('installSyncTrigger: removed ' + removed.length + ', now ' + now + ' syncAll trigger(s), daily 02:00 ' + APP.TZ + '.');
+}
+
+// --- Stage 2: proposed categories -------------------------------------------------------------
+// All three charts share one template (checked 3 Nov 2026), so one proposal fits all; codes are
+// still validated per company against the synced chart before anything is written.
+// Keywords are whole words or phrases; longer matches win, so put specific phrases where needed.
+const CATEGORY_PROPOSALS = Object.freeze([
+  { sort: 10, name: 'Fuel', code: '433', keywords: 'fuel, petrol, diesel, unleaded, engine oil, motor oil, engen, shell, sasol, bp, caltex, astron, totalenergies' },
+  { sort: 20, name: 'Vehicle repairs and tyres', code: '432', keywords: 'tyre, tyres, puncture, wheel alignment, car service, car battery, wiper, wipers, car wash, brake pads, exhaust' },
+  { sort: 30, name: 'Lab consumables', code: '312', keywords: 'lab, laboratory, reagent, reagents, pipette, pipettes, pipette tips, petri, swab, swabs, test kit, test strips, beaker, agar, culture media, ph strips' },
+  { sort: 40, name: 'Raw materials', code: '313', keywords: 'raw material, raw materials, ingredient, ingredients, bulk powder', note: 'HPB and PK also have 318 Plant Raw Materials (defaults to old 14% VAT).' },
+  { sort: 50, name: 'Packaging', code: '311', keywords: 'packaging, carton, cartons, box, boxes, bottle, bottles, jar, jars, lids, caps, sachet, sachets, bubble wrap, packing tape, shrink wrap, pallet wrap' },
+  { sort: 60, name: 'Labels', code: '310', keywords: 'label, labels, sticker, stickers, barcode, barcodes, label roll' },
+  { sort: 70, name: 'Cleaning', code: '404', keywords: 'cleaning, detergent, bleach, jik, sanitiser, sanitizer, disinfectant, soap, mop, broom, handy andy, dishwashing, toilet paper, refuse bags, bin bags' },
+  { sort: 80, name: 'Protective clothing (PPE)', code: '421', keywords: 'ppe, gloves, nitrile gloves, overalls, safety boots, gumboots, hairnet, hairnets, face mask, masks, goggles, lab coat, apron, hard hat' },
+  { sort: 90, name: 'Repairs: building', code: '422', keywords: 'plumber, plumbing, paint, cement, light bulb, globe, globes, tap, padlock, lock, door handle, hardware, builders, silicone' },
+  { sort: 100, name: 'Repairs: machinery', code: '423', keywords: 'bearing, bearings, v-belt, drive belt, motor, pump, spares, spare parts, welding, gasket, o-ring, seal, fittings, grease' },
+  { sort: 110, name: 'Small tools', code: '306', keywords: 'tool, tools, screwdriver, spanner, drill bit, drill bits, hammer, pliers, tape measure, extension cord, multiplug, cable ties', note: 'No tools account in the chart: mapped to 306 Consumables - Factory. Please review.' },
+  { sort: 120, name: 'Staff refreshments', code: '426', keywords: 'coffee, tea, milk, sugar, creamer, biscuits, refreshments, snacks, bottled water, lunch, cake' },
+  { sort: 130, name: 'Courier and postage', code: '303', keywords: 'courier, postage, post office, pargo, paxi, aramex, courier guy, dhl, fedex, postnet' },
+  { sort: 140, name: 'Office supplies and stationery', code: '420', keywords: 'stationery, a4 paper, paper, pen, pens, printer ink, ink, toner, cartridge, stapler, envelopes, files, printing, notebook' },
+]);
+
+/**
+ * Writes the proposals to Categories with active = FALSE (one row per company and name; existing rows
+ * are never touched, so your corrections survive a re-run) and prints the mapping for review.
+ * Run syncAll() first: codes are checked against the synced Accounts tab.
+ */
+function proposeCategories() {
+  const purchase = ['EXPENSE', 'DIRECTCOSTS', 'OVERHEADS'];
+  const accounts = readTable('Accounts').rows;
+  const existing = readTable('Categories').rows;
+  const report = {};
+  ENTITY_SEED.forEach(e => {
+    const chart = {};
+    accounts.filter(a => a.entity_id === e.entity_id).forEach(a => { chart[String(a.code)] = a; });
+    if (!Object.keys(chart).length) throw new AppError('SETUP_ORDER', 'No synced accounts for ' + e.entity_id + '. Run syncAll() first.');
+    report[e.entity_id] = CATEGORY_PROPOSALS.map(p => {
+      const acct = chart[p.code];
+      const ok = acct && acct.status === 'ACTIVE' && acct.class === 'EXPENSE' && purchase.indexOf(acct.type) !== -1;
+      const already = existing.find(c => c.entity_id === e.entity_id && String(c.name).toLowerCase() === p.name.toLowerCase());
+      if (!already) {
+        appendRow('Categories', {
+          category_id: Utilities.getUuid(), entity_id: e.entity_id, name: p.name,
+          account_code: ok ? p.code : '', tax_type: getConfig('PURCHASE_TAX_TYPE', 'INPUT3'),
+          keywords: p.keywords, sort: p.sort, active: false,
+        });
+      }
+      return {
+        sort: p.sort, category: p.name, code: ok ? p.code : '(none)', account: acct ? acct.name : 'NOT IN CHART',
+        type: acct ? acct.type : '-', defaultTax: acct ? acct.tax_type : '-',
+        row: already ? 'kept existing (' + (already.account_code || 'blank') + ', active=' + already.active + ')' : 'added, inactive',
+        note: (ok ? '' : 'CODE ' + p.code + ' NOT A VALID PURCHASE ACCOUNT HERE. ') + (p.note || ''),
+      };
+    });
+  });
+  Object.keys(report).forEach(ent => out_('Proposed categories: ' + ent, table_(report[ent], ['sort', 'category', 'code', 'account', 'type', 'defaultTax', 'row', 'note'])));
+  console.log('Review the Categories tab, correct any account_code, then set active = TRUE on the ones you want.');
+}

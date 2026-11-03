@@ -540,3 +540,157 @@ function table_(rows, cols) {
   const line = vals => vals.map((v, i) => pad_(v, w[i])).join(' | ');
   return [line(cols), w.map(n => new Array(n + 1).join('-')).join('-+-')].concat(rows.map(r => line(cols.map(c => r[c])))).join('\n');
 }
+
+// --- Stage 2: coding engine unit tests (fixtures only, no Sheet or Composio) -----------------
+
+function codingFixture_() {
+  const A = (ent, code, name, type, cls, tax, status) => ({ entity_id: ent, account_id: ent + '-' + code, code: code, name: name, type: type, class: cls || 'EXPENSE', tax_type: tax || 'INPUT3', status: status || 'ACTIVE' });
+  const C = (id, ent, name, code, keywords, sort, active) => ({ category_id: id, entity_id: ent, name: name, account_code: code, tax_type: '', keywords: keywords, sort: sort, active: active === undefined ? true : active });
+  const H = (ent, contact, code, uses) => ({ entity_id: ent, contact_id: contact, account_code: code, uses: uses, last_used: new Date('2026-10-01') });
+  return {
+    accounts: [
+      A('NHP', '433', 'Vehicle - Petrol and oil', 'EXPENSE'),
+      A('NHP', '404', 'Cleaning', 'EXPENSE'),
+      A('NHP', '311', 'Packaging', 'DIRECTCOSTS'),
+      A('NHP', '312', 'Quality Control', 'DIRECTCOSTS'),
+      A('NHP', '421', 'Protective clothing', 'EXPENSE'),
+      A('NHP', '465', 'Unallocated Expenses', 'EXPENSE', 'EXPENSE', 'NONE'),
+      A('NHP', '409', 'Depreciation', 'DEPRECIATN', 'EXPENSE', 'NONE'),
+      A('NHP', '420', 'Printing and stationery', 'EXPENSE', 'EXPENSE', 'INPUT3', 'ARCHIVED'),
+      A('NHP', '318', 'Plant Raw Materials', 'DIRECTCOSTS', 'EXPENSE', 'INPUT'),
+      A('NHP', '710', 'Office Equipment', 'FIXED', 'ASSET'),
+      A('PK', '600', 'PK-only expense', 'EXPENSE'),
+    ],
+    taxRates: [
+      { entity_id: 'NHP', tax_type: 'INPUT3', rate: 15, status: 'ACTIVE' },
+      { entity_id: 'NHP', tax_type: 'NONE', rate: 0, status: 'ACTIVE' },
+      { entity_id: 'NHP', tax_type: 'INPUT', rate: 14, status: 'ACTIVE' },
+    ],
+    categories: [
+      C('cat-fuel', 'NHP', 'Fuel', '433', 'fuel, petrol, shell', 10),
+      C('cat-clean', 'NHP', 'Cleaning', '404', 'cleaning, bleach, jik, mop', 20),
+      C('cat-pack', 'NHP', 'Packaging', '311', 'boxes, bottles', 30),
+      C('cat-lab', 'NHP', 'Lab consumables', '312', 'lab, reagent', 40),
+      C('cat-ppe', 'NHP', 'PPE', '421', 'gloves, lab coat', 50),
+      C('cat-stat', 'NHP', 'Stationery', '420', 'paper, pens', 60),
+      C('cat-wrong', 'NHP', 'Uses a PK code', '600', 'widget', 70),
+      C('cat-raw', 'NHP', 'Raw (old VAT default)', '318', 'raw materials', 80),
+      C('cat-off', 'NHP', 'Switched off', '433', 'unicorn', 90, 'FALSE'),
+      C('cat-pk', 'PK', 'PK fuel', '600', 'pkfuel', 10),
+    ],
+    history: [
+      H('NHP', 'sup-fuel', '433', 4),
+      H('NHP', 'sup-mixed', '433', 2), H('NHP', 'sup-mixed', '404', 3),
+      H('NHP', 'sup-archived', '420', 5),
+      H('NHP', 'sup-wrongco', '600', 5),
+      H('PK', 'sup-pkonly', '600', 5),
+    ],
+    config: { historyN: 5, defaultAccount: '465', extraAccounts: '', purchaseTaxType: 'INPUT3' },
+  };
+}
+
+function testCoding() {
+  const F = codingFixture_;
+  const withConfig = patch => { const d = F(); Object.assign(d.config, patch); return d; };
+  const run = (data, contact, cat, desc) => suggestAccountWith_(data, 'NHP', contact, cat, desc);
+  const cases = [
+    // 1. supplier history
+    ['history: unanimous supplier', () => run(F(), 'sup-fuel', null, 'whatever'), { source: 'history', accountCode: '433', reasonHas: 'Last 4 purchases' }],
+    ['history: mixed codes fall through to keywords', () => run(F(), 'sup-mixed', null, 'Jik and a mop'), { source: 'keyword', accountCode: '404' }],
+    // 2. keywords
+    ['keyword: match', () => run(F(), null, null, 'Unleaded PETROL 40L'), { source: 'keyword', accountCode: '433' }],
+    ['keyword: whole words only ("shellfish" is not "shell")', () => run(F(), null, null, 'Shellfish platter'), { source: 'fallback', accountCode: '465' }],
+    ['keyword: longer phrase wins ("lab coat" beats "lab")', () => run(F(), null, null, 'Lab coat, size M'), { source: 'keyword', accountCode: '421' }],
+    ['keyword: beats the chosen category (spec order)', () => run(F(), null, 'cat-pack', 'bleach'), { source: 'keyword', accountCode: '404' }],
+    // 3. category default
+    ['category: default when no history or keyword', () => run(F(), null, 'cat-pack', 'assorted'), { source: 'category', accountCode: '311' }],
+    ['category: switched-off category ignored', () => run(F(), null, 'cat-off', 'unicorn'), { source: 'fallback', accountCode: '465' }],
+    // 4. fallback
+    ['fallback: flagged needs review, account tax type', () => run(F(), null, null, 'something odd'), { source: 'fallback', accountCode: '465', needsReview: true, taxType: 'NONE' }],
+    ['fallback: depreciation (DEPRECIATN) is not a purchase account', () => run(withConfig({ defaultAccount: '409' }), null, null, 'x'), { source: 'none', accountCode: null, needsReview: true }],
+    ['fallback: EXTRA_PURCHASE_ACCOUNTS allows a FIXED asset code', () => run(withConfig({ defaultAccount: '710', extraAccounts: '710, 999' }), null, null, 'x'), { source: 'fallback', accountCode: '710' }],
+    // archived codes
+    ['archived: history code skipped, keyword used', () => run(F(), 'sup-archived', null, 'petrol'), { source: 'keyword', accountCode: '433' }],
+    ['archived: keyword category code skipped', () => run(F(), null, null, 'A4 paper'), { source: 'fallback', accountCode: '465' }],
+    ['archived: category default skipped', () => run(F(), null, 'cat-stat', 'x'), { source: 'fallback', accountCode: '465' }],
+    // wrong company
+    ['wrong company: history code that only exists in PK', () => run(F(), 'sup-wrongco', null, 'x'), { source: 'fallback', accountCode: '465' }],
+    ['wrong company: PK supplier history not used for NHP', () => run(F(), 'sup-pkonly', null, 'x'), { source: 'fallback', accountCode: '465' }],
+    ['wrong company: NHP category mapped to a PK code', () => run(F(), null, 'cat-wrong', 'widget'), { source: 'fallback', accountCode: '465' }],
+    ['wrong company: PK category ID passed for NHP', () => run(F(), null, 'cat-pk', 'pkfuel'), { source: 'fallback', accountCode: '465' }],
+    ['wrong company: default account that only exists in PK', () => run(withConfig({ defaultAccount: '600' }), null, null, 'x'), { source: 'none', accountCode: null }],
+    // tax type
+    ['tax: legacy 14% INPUT default replaced by INPUT3', () => run(F(), null, 'cat-raw', 'x'), { source: 'category', accountCode: '318', taxType: 'INPUT3' }],
+  ];
+
+  const lines = [];
+  let failures = 0;
+  cases.forEach(c => {
+    let got, problem = '';
+    try { got = c[1](); } catch (err) { problem = 'threw ' + err.message; }
+    if (!problem) {
+      const exp = c[2];
+      Object.keys(exp).forEach(k => {
+        if (k === 'reasonHas') { if (String(got.reason).indexOf(exp[k]) === -1) problem += ' reason="' + got.reason + '"'; }
+        else if (got[k] !== exp[k]) problem += ' ' + k + '=' + JSON.stringify(got[k]) + ' (want ' + JSON.stringify(exp[k]) + ')';
+      });
+    }
+    if (problem) failures++;
+    lines.push((problem ? 'FAIL ' : 'PASS ') + c[0] + (problem ? ' ->' + problem : '  [' + got.source + ' ' + got.accountCode + ' ' + got.taxType + ']'));
+  });
+
+  // Supplier-history window and recordChoice trimming.
+  const d = s => new Date(s);
+  const check = (label, cond, detail) => { if (!cond) failures++; lines.push((cond ? 'PASS ' : 'FAIL ') + label + (cond ? '' : ' -> ' + detail)); };
+  const evs = [{ contactId: 'S', date: d('2026-01-01'), codes: ['404'] }]
+    .concat([2, 3, 4, 5, 6].map(m => ({ contactId: 'S', date: d('2026-0' + m + '-01'), codes: ['433'] })));
+  const h1 = buildSupplierHistory_(evs, 5);
+  check('history window: oldest purchase drops out of last 5', h1.length === 1 && h1[0].account_code === '433' && h1[0].uses === 5, JSON.stringify(h1));
+  const h2 = buildSupplierHistory_([{ contactId: 'S', date: d('2026-06-01'), codes: ['433', '404'] }], 5);
+  check('history window: multi-code bill keeps both codes (not unanimous)', h2.length === 2, JSON.stringify(h2));
+  const a1 = applyChoice_([{ account_code: '433', uses: 4, last_used: d('2026-06-01') }, { account_code: '404', uses: 1, last_used: d('2026-01-01') }], '433', d('2026-11-03'), 5);
+  check('recordChoice: window trimmed, oldest code removed', a1.length === 1 && a1[0].uses === 5, JSON.stringify(a1));
+  const a2 = applyChoice_([{ account_code: '433', uses: 5, last_used: d('2026-06-01') }], '404', d('2026-11-03'), 5);
+  check('recordChoice: new code added, total stays at N', a2.length === 2 && a2.find(r => r.account_code === '433').uses === 4 && a2.find(r => r.account_code === '404').uses === 1, JSON.stringify(a2));
+
+  // Cache chunking.
+  const big = new Array(9000).join('Pharma Karu é ✓ ');   // multibyte, ~150k chars
+  const chunks = chunkString_(big);
+  const maxBytes = Math.max.apply(null, chunks.map(c => Utilities.newBlob(c).getBytes().length));
+  check('cache: large value split into chunks under 100 KB that rejoin exactly', chunks.length > 1 && maxBytes < 100 * 1024 && chunks.join('') === big, chunks.length + ' chunks, max ' + maxBytes + ' bytes');
+  check('cache: small value stays in one chunk', chunkString_('{"a":1}').length === 1, '');
+
+  out_('testCoding: ' + (failures ? failures + ' FAILURE(S)' : 'all ' + lines.length + ' passed'), lines.join('\n'));
+}
+
+/** After syncAll: proves the live path (cache → engine) works for each company. */
+function testCodingLive() {
+  ENTITY_SEED.forEach(e => {
+    const t0 = Date.now();
+    const ref = getRefData(e.entity_id);
+    const r = suggestAccount(e.entity_id, null, null, 'Unleaded petrol');
+    console.log(e.entity_id + ': cache ' + (ref.fromCache ? 'HIT' : 'MISS (rebuilt from Sheet)') + ' v' + ref.version + ', ' + ref.accounts.length + ' accounts, ' + ref.suppliers.length + ' suppliers; ' +
+      '"Unleaded petrol" -> ' + r.source + ' ' + r.accountCode + ' ' + r.taxType + ' (' + (Date.now() - t0) + ' ms): ' + r.reason);
+  });
+}
+
+/** Stage 2 guards: the tenant-unsafe tool is refused, and cross-company IDs block a sync write. */
+function testSyncGuards() {
+  const lines = [];
+  let failures = 0;
+  const check = (label, cond, detail) => { if (!cond) failures++; lines.push((cond ? 'PASS ' : 'FAIL ') + label + (cond ? '' : ' -> ' + detail)); };
+
+  let code = '';
+  try { xeroTool_('XERO_GET_CONTACTS', ENTITY_SEED[0].xero_tenant_id, {}); } catch (err) { code = err.code; }
+  check('XERO_GET_CONTACTS refused before any network call', code === 'TOOL_UNSAFE', code);
+
+  const shared = { supplierRows: [{ contact_id: 'c-1' }, { contact_id: 'c-2' }], accountRows: [{ account_id: 'a-1' }] };
+  const leak = isolationProblems_({ HPB: shared, NHP: { supplierRows: [{ contact_id: 'c-1' }], accountRows: [{ account_id: 'a-9' }] }, PK: { supplierRows: [{ contact_id: 'c-7' }], accountRows: [] } });
+  check('same ContactID under HPB and NHP flags both', !!leak.HPB && !!leak.NHP && !leak.PK, JSON.stringify(leak));
+  const leakAcct = isolationProblems_({ HPB: { accountRows: [{ account_id: 'a-1' }] }, PK: { accountRows: [{ account_id: 'a-1' }] } });
+  check('same AccountID under HPB and PK flags both', !!leakAcct.HPB && !!leakAcct.PK, JSON.stringify(leakAcct));
+  const clean = isolationProblems_({ HPB: shared, NHP: { supplierRows: [{ contact_id: 'c-3' }], accountRows: [{ account_id: 'a-2' }] } });
+  check('distinct IDs pass', Object.keys(clean).length === 0, JSON.stringify(clean));
+
+  out_('testSyncGuards: ' + (failures ? failures + ' FAILURE(S)' : 'all ' + lines.length + ' passed'), lines.join('\n'));
+}

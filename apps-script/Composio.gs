@@ -14,6 +14,10 @@
 const COMPOSIO_BASE_URL = 'https://backend.composio.dev/api/v3.1';
 const COMPOSIO_MAX_ATTEMPTS = 3;
 
+// Counts calls (including retries) in this execution, so syncs can report their cost against the
+// ~20,000/month free-tier budget.
+const composioStats_ = { calls: 0 };
+
 /**
  * Runs a Composio tool and returns its `data`. Throws AppError on failure.
  * ctx (optional): { entityId, userId, ref } for the audit log.
@@ -104,6 +108,7 @@ function composioRequest_(path, body, label, ctx, classify) {
 
   while (attempt < COMPOSIO_MAX_ATTEMPTS) {
     attempt++;
+    composioStats_.calls++;
     let resp;
     try {
       resp = UrlFetchApp.fetch(COMPOSIO_BASE_URL + path, {

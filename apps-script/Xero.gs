@@ -30,7 +30,13 @@ function assertUuid_(id, what) {
  * tenantParam: most tools take `tenant_id`, but XERO_LIST_INVOICES takes `tenantId`. Sending the
  * wrong key would be ignored by Composio and fall back to the first org, so it is explicit per tool.
  */
+// Tools proven to IGNORE tenant_id and answer from the first connected org (HPB). Verified 3 Nov 2026:
+// XERO_GET_CONTACTS returned HPB's 97 contacts (same ContactIDs) for HPB, NHP and PK alike.
+// Their reads go through the proxy with an explicit xero-tenant-id header instead.
+const TENANT_UNSAFE_TOOLS = Object.freeze(['XERO_GET_CONTACTS']);
+
 function xeroTool_(toolSlug, tenantId, args, ctx, tenantParam) {
+  if (TENANT_UNSAFE_TOOLS.indexOf(toolSlug) !== -1) throw new AppError('TOOL_UNSAFE', toolSlug + ' ignores tenant_id; use the proxy helper instead.');
   const g = assertTenant_(tenantId);
   const a = Object.assign({}, args || {});
   delete a.tenant_id;
@@ -75,6 +81,25 @@ function xeroFirst_(body, key, idField) {
   return null;
 }
 
+/**
+ * Fetches every page of a paged list tool. Stops at pagination.pageCount when Xero reports it,
+ * otherwise at the first empty page (never at a short page: Composio may cap pageSize silently).
+ * deadline (ms epoch) aborts long syncs before Apps Script's 6-minute limit kills them mid-write.
+ */
+function xeroListAllPages(toolSlug, tenantId, args, key, opts) {
+  opts = opts || {};
+  const all = [];
+  for (let page = 1; page <= (opts.maxPages || 200); page++) {
+    if (opts.deadline && Date.now() > opts.deadline) throw new AppError('SYNC_TIMEOUT', toolSlug + ' stopped at page ' + page + ' to stay inside the time limit.');
+    const body = xeroTool_(toolSlug, tenantId, Object.assign({}, args || {}, { page: page }), opts.ctx, opts.tenantParam);
+    const items = xeroList_(body, key);
+    items.forEach(i => all.push(i));
+    const pageCount = body.pagination && Number(body.pagination.pageCount);
+    if (pageCount ? page >= pageCount : items.length === 0) break;
+  }
+  return all;
+}
+
 // --- Connections and organisation --------------------------------------------------------------
 
 /** The only call without a tenant: it is how tenants are discovered. Callers must filter the result. */
@@ -106,9 +131,44 @@ function xeroListTaxRates(tenantId, where, ctx) {
 
 // --- Contacts ---------------------------------------------------------------------------------
 
-/** query: any XERO_GET_CONTACTS argument (where, searchTerm, ContactID, page, pageSize, includeArchived…). */
+const CONTACT_QUERY_KEYS = Object.freeze(['page', 'pageSize', 'where', 'order', 'searchTerm', 'includeArchived', 'summaryOnly', 'IDs']);
+
+/**
+ * Contacts via the proxy (XERO_GET_CONTACTS ignores tenant_id — see TENANT_UNSAFE_TOOLS).
+ * query: { ContactID } for one contact, or any of CONTACT_QUERY_KEYS. Returns an array.
+ */
 function xeroGetContacts(tenantId, query, ctx) {
-  return xeroList_(xeroTool_('XERO_GET_CONTACTS', tenantId, query || {}, ctx), 'Contacts');
+  return xeroGetContactsPage_(tenantId, query, ctx).items;
+}
+
+function xeroGetContactsPage_(tenantId, query, ctx) {
+  query = query || {};
+  if (query.ContactID) {
+    const one = xeroGetContactById(tenantId, query.ContactID, ctx);
+    return { items: one ? [one] : [], pagination: null };
+  }
+  const qs = CONTACT_QUERY_KEYS.filter(k => query[k] !== undefined && query[k] !== null && query[k] !== '')
+    .map(k => k + '=' + encodeURIComponent(Array.isArray(query[k]) ? query[k].join(',') : String(query[k])))
+    .join('&');
+  const res = xeroProxy_(tenantId, 'GET', '/Contacts' + (qs ? '?' + qs : ''), {}, ctx);
+  const body = res.data || {};
+  return { items: xeroList_(body, 'Contacts'), pagination: body.pagination || null };
+}
+
+/** Every ACTIVE contact of one company, paged through the proxy. */
+function xeroListAllContacts(tenantId, opts) {
+  opts = opts || {};
+  const pageSize = opts.pageSize || 500;
+  const all = [];
+  for (let page = 1; page <= (opts.maxPages || 100); page++) {
+    if (opts.deadline && Date.now() > opts.deadline) throw new AppError('SYNC_TIMEOUT', 'Contacts stopped at page ' + page + ' to stay inside the time limit.');
+    const r = xeroGetContactsPage_(tenantId, { page: page, pageSize: pageSize }, opts.ctx);
+    r.items.forEach(c => all.push(c));
+    const pageCount = r.pagination && Number(r.pagination.pageCount);
+    // Xero itself honours pageSize, so a short page is the last one even without pagination info.
+    if (pageCount ? page >= pageCount : r.items.length < pageSize) break;
+  }
+  return all;
 }
 
 function xeroCreateContact(tenantId, fields, ctx) {
@@ -117,9 +177,8 @@ function xeroCreateContact(tenantId, fields, ctx) {
   return xeroFirst_(body, 'Contacts', 'ContactID');
 }
 
-// XERO_GET_CONTACTS never returns ARCHIVED contacts: it ignores includeArchived and 404s on an
-// archived ContactID (seen 3 Nov 2026). Xero's own API does return them, so lookups that must see
-// archived contacts (e.g. before creating a "new" supplier whose name Xero already holds) use the proxy.
+// Single-contact and by-name lookups also go through the proxy, which sends xero-tenant-id explicitly
+// and returns archived contacts too (needed before creating a "new" supplier whose name Xero holds).
 
 function xeroGetContactById(tenantId, contactId, ctx) {
   assertUuid_(contactId, 'ContactID');

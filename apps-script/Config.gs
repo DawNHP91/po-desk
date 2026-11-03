@@ -30,6 +30,14 @@ const CONFIG_DEFAULTS = Object.freeze({
   // and is DELETED in NHP, so never rely on an account's default tax type. Confirm with the accountant.
   PURCHASE_TAX_TYPE: 'INPUT3',
   NO_VAT_TAX_TYPE: 'NONE',
+  // Coding-engine fallback: 465 "Unallocated Expenses" exists in all three charts and is an obvious
+  // "needs review" bucket for the accountant. Extras: comma-separated codes outside EXPENSE class.
+  DEFAULT_ACCOUNT_HPB: '465',
+  DEFAULT_ACCOUNT_NHP: '465',
+  DEFAULT_ACCOUNT_PK: '465',
+  EXTRA_PURCHASE_ACCOUNTS_HPB: '',
+  EXTRA_PURCHASE_ACCOUNTS_NHP: '',
+  EXTRA_PURCHASE_ACCOUNTS_PK: '',
   APP_VERSION: APP.VERSION,
   // 'proxy' = Xero Attachments API through Composio's proxy; 'tool' = Composio file upload + XERO_UPLOAD_ATTACHMENT.
   ATTACHMENT_ROUTE: 'proxy',
