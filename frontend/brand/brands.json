@@ -1,0 +1,32 @@
+{
+  "PK": {
+    "name": "Pharma Karu",
+    "legalName": "Pharma Karu (Pty) Ltd",
+    "logo": "brand/pk/logo-horizontal.png",
+    "logoStacked": "brand/pk/logo-stacked.png",
+    "primary": "#14532D",
+    "accent": "#C4862A",
+    "ink": "#5B6470",
+    "note": "Forest Green primary; Karoo Ochre accent is for fills and highlights only (3.1:1 on white), not small text"
+  },
+  "HPB": {
+    "name": "HP Biotech",
+    "legalName": "HP Biotech Group (Pty) Ltd",
+    "logo": "brand/hpb/logo.png",
+    "primary": "#386D27",
+    "accent": "#4D8429",
+    "ink": "#01201A",
+    "highlight": "#F7FCC0",
+    "note": "Leaf green primary; dark green-black ink from the wordmark; pale lime from the molecule dots"
+  },
+  "NHP": {
+    "name": "NHP Global",
+    "legalName": "NHP GLOBAL SA (PTY) LTD",
+    "logo": "brand/nhp/logo.png",
+    "primary": "#509544",
+    "accent": "#7A9D41",
+    "ink": "#595959",
+    "note": "Existing NHP brand colours, confirmed against the logo. #509544 gives only 3.7:1 with white, so use #427C38 behind small white text (buttons)",
+    "buttonOnWhite": "#427C38"
+  }
+}

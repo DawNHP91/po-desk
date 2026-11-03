@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# macOS
+.DS_Store
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# clasp credentials (OAuth tokens and client secrets; .clasp.json only holds the script ID and is safe to commit)
+.clasprc.json
+**/.clasprc.json
+creds.json
+client_secret*.json
