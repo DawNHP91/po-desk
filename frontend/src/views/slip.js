@@ -22,7 +22,7 @@ export function render(root, ctx, params) {
       h('p', { class: 'font-mono text-lg font-semibold' }, p.poNumber || p.provisionalRef),
       h('p', { class: 'text-slate-700' }, p.supplierName + ' · ' + rand(p.amountInclZar))));
     if (p.status !== 'ISSUED') { fill(stage, alertBox('A slip can only be added once the PO is approved and has its Xero number.', 'warn')); return; }
-    showPickers();
+    if (!photo) showPickers();   // never throw away a photo that is already being prepared or shown
   }).catch((err) => { if (alive && err.code !== 'AUTH_REQUIRED') fill(stage, alertBox(err.message)); });
 
   const big = 'w-full rounded-2xl px-4 py-4 text-lg font-semibold touch-manipulation disabled:opacity-60';
@@ -37,6 +37,7 @@ export function render(root, ctx, params) {
   }
 
   async function onFile(file) {
+    if (!po || po.status !== 'ISSUED') return;   // the pickers only appear once the PO is loaded and open
     message.replaceChildren();
     fill(stage, h('p', { class: 'py-8 text-center text-slate-600' }, 'Preparing the photo…'));
     try {
@@ -57,11 +58,12 @@ export function render(root, ctx, params) {
   async function useIt(e) {
     const btn = e.currentTarget;
     if (btn.disabled) return;
+    const shot = photo;   // this photo, whatever happens to the screen meanwhile
     stage.querySelectorAll('button').forEach((b) => { b.disabled = true; });
     btn.textContent = 'Saving the photo…';
     let billId;
     try {
-      billId = (await call('uploadSlip', { poId, imageBase64: photo.base64, mimeType: 'image/jpeg' }, { timeoutMs: 60000 })).billId;
+      billId = (await call('uploadSlip', { poId, imageBase64: shot.base64, mimeType: 'image/jpeg' }, { timeoutMs: 60000 })).billId;
     } catch (err) {
       stage.querySelectorAll('button').forEach((b) => { b.disabled = false; });
       btn.textContent = 'Use this photo';
@@ -76,7 +78,7 @@ export function render(root, ctx, params) {
       // The photo is saved; the review screen lets the buyer type the values or try reading again.
       view = null;
     }
-    handover.set('slip:' + billId, { view, dataUrl: photo.dataUrl });
+    handover.set('slip:' + billId, { view, dataUrl: shot.dataUrl });
     ctx.go('/slip/' + billId);
   }
 
