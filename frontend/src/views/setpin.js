@@ -6,20 +6,28 @@ import { call } from '../api.js';
 
 export function render(root, ctx, params) {
   const token = new URLSearchParams(params[0] || '').get('t') || '';
-  // Keep the token out of the address bar and the browser history once it has been read.
-  history.replaceState(null, '', location.pathname + location.search + '#/set-pin');
+  // The token stays in the address bar until the PIN is saved (or the link is known to be dead), so
+  // reloading after a slow answer still works; then it is removed from the address bar and history.
+  const forget = () => history.replaceState(null, '', location.pathname + location.search + '#/set-pin');
+  const SLOW = 60000;   // Apps Script can be slow for a while; a link check must not give up at 25 s
   let alive = true;
   const main = h('div', {}, h('p', { class: 'mt-6 text-center text-slate-500' }, 'Checking your link…'));
   root.append(main);
   check();
 
   async function check() {
+    fill(main, h('p', { class: 'mt-6 text-center text-slate-500' }, 'Checking your link…'));
     try {
-      const who = await call('checkPinToken', { token });
+      const who = await call('checkPinToken', { token }, { timeoutMs: SLOW });
       if (alive) form(who);
     } catch (err) {
-      if (alive) fill(main, h('h1', { class: 'mt-2 text-2xl font-bold' }, 'Set your PIN'), h('div', { class: 'mt-4' }, alertBox(err.message)),
-        h('a', { href: '#/login', class: 'mt-6 block text-center font-medium text-brand' }, 'Go to sign in'));
+      if (!alive) return;
+      const slow = err.code === 'TIMEOUT' || err.code === 'NETWORK' || err.code === 'BAD_RESPONSE';
+      if (!slow) forget();
+      fill(main, h('h1', { class: 'mt-2 text-2xl font-bold' }, 'Set your PIN'),
+        h('div', { class: 'mt-4' }, alertBox(slow ? 'PO Desk is slow to answer right now. Your link still works: try again in a moment.' : err.message, slow ? 'warn' : 'error')),
+        slow ? h('button', { type: 'button', class: 'mt-6 w-full rounded-2xl bg-brand px-4 py-4 text-lg font-semibold text-white', onclick: check }, 'Try again')
+          : h('a', { href: '#/login', class: 'mt-6 block text-center font-medium text-brand' }, 'Go to sign in'));
     }
   }
 
@@ -41,8 +49,9 @@ export function render(root, ctx, params) {
       save.disabled = true;
       msg.replaceChildren();
       try {
-        const r = await call('setPinWithToken', { token, pin: pin.value, pin2: pin2.value });
+        const r = await call('setPinWithToken', { token, pin: pin.value, pin2: pin2.value }, { timeoutMs: SLOW });
         if (!alive) return;
+        forget();
         if (ctx.auth.isSignedIn()) await ctx.auth.logout();
         ctx.auth.rememberEmail(r.email);
         fill(main,
@@ -52,7 +61,8 @@ export function render(root, ctx, params) {
           h('button', { type: 'button', class: 'mt-6 w-full rounded-2xl bg-brand px-4 py-4 text-lg font-semibold text-white', onclick: () => ctx.go('/login') }, 'Sign in'));
       } catch (err) {
         save.disabled = false;
-        msg.replaceChildren(alertBox(err.message));
+        // A timed-out save may still have worked: the link is then used up, so say how to check.
+        msg.replaceChildren(alertBox(err.code === 'TIMEOUT' ? 'PO Desk took too long to answer. Try signing in with your new PIN; if that fails, tap Save my PIN again.' : err.message));
       }
     });
     fill(main,
