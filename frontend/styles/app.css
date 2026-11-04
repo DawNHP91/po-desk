@@ -1,0 +1,31 @@
+/* Tailwind v4, compiled at build time by the Tailwind CLI (never the Play CDN). */
+@import "tailwindcss" source(none);
+@source "../index.html";
+@source "../src";
+
+/*
+ * Brand colours are CSS variables that brand.js sets at runtime (from brand/brands.json), so one
+ * stylesheet serves every company. "inline" makes utilities like bg-brand read the live variable.
+ */
+@theme inline {
+  --color-brand: var(--brand-primary);
+  --color-brand-accent: var(--brand-accent);
+  --color-brand-ink: var(--brand-ink);
+}
+
+:root {
+  /* Pharma Karu shell until brand.js runs. */
+  --brand-primary: #14532D;
+  --brand-accent: #C4862A;
+  --brand-ink: #5B6470;
+  color-scheme: light;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body {
+  background: #f8fafc;
+}
+
+body {
+  min-height: 100dvh;
+}

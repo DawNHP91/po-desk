@@ -1,0 +1,12 @@
+# Cloudflare Pages response headers.
+# connect-src: the Apps Script web app answers from script.google.com, then redirects to
+# script.googleusercontent.com, so both must be allowed. Everything else is same-origin only.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://script.google.com https://script.googleusercontent.com; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: geolocation=(), microphone=(), payment=(), usb=()
+  X-Frame-Options: DENY
+
+/index.html
+  Cache-Control: no-cache

@@ -218,3 +218,116 @@ function proposeCategories() {
   Object.keys(report).forEach(ent => out_('Proposed categories: ' + ent, table_(report[ent], ['sort', 'category', 'code', 'account', 'type', 'defaultTax', 'row', 'note'])));
   console.log('Review the Categories tab, correct any account_code, then set active = TRUE on the ones you want.');
 }
+
+// --- Stage 3: users ---------------------------------------------------------------------------
+// Bootstrap only. Everyone except the first admin is added on the People screen (Stage 7), and
+// PINs are always chosen by the person themselves; nothing here prints or stores a PIN in a file.
+
+const ADMIN_SEED = Object.freeze({ name: 'Dawid Groenewald', email: 'dawie@nhpglobalgroup.com', role: 'admin', entities: ['HPB', 'NHP', 'PK'] });
+// po_limit_zar per company, confirmed with Dawie before seeding (CLAUDE.md). null = not confirmed yet.
+const ADMIN_PO_LIMIT_ZAR = Object.freeze({ HPB: null, NHP: null, PK: null });
+
+const TEST_BUYER = Object.freeze({ name: 'Test Buyer NHP', email: 'test.buyer@po-desk.test', role: 'buyer', entity: 'NHP', poLimitZar: 500 });
+
+/** Creates an active user with no PIN. Safe to run twice: an existing email is returned unchanged. */
+function createUser(name, email, role) {
+  const e = normEmail_(email);
+  if (!String(name || '').trim()) throw new AppError('BAD_REQUEST', 'Name is required.');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) throw new AppError('BAD_REQUEST', 'A valid email is required.');
+  if (ROLES.indexOf(role) === -1) throw new AppError('BAD_REQUEST', 'Role must be buyer, approver or admin.');
+  const existing = findUserByEmail_(e);
+  if (existing) {
+    console.log('createUser: ' + e + ' already exists (' + existing.user_id + ', role ' + existing.role + '). Left unchanged.');
+    return existing;
+  }
+  const row = {
+    user_id: Utilities.getUuid(), name: String(name).trim(), email: e, pin_hash: '', pin_salt: '', role: role,
+    active: true, failed_attempts: 0, locked_until: '', pin_token_hash: '', pin_token_expires: '',
+    created_by: 'setup', created_at: new Date(),
+  };
+  appendRow('Users', row);
+  auditLog({ userId: row.user_id, action: 'user.create', ok: true, detail: { role: role, by: 'setup' } });
+  console.log('createUser: ' + e + ' created as ' + role + ' (' + row.user_id + '). No PIN yet.');
+  return findUserByEmail_(e);
+}
+
+/** Upserts one UserEntities row. An existing row keeps its values unless `overwrite` is true. */
+function grantEntity_(userId, entityId, canBuy, canApprove, poLimitZar, overwrite) {
+  const ent = entityById_(entityId).entity_id;
+  const row = readTable('UserEntities').rows.find(r => String(r.user_id) === String(userId) && r.entity_id === ent);
+  const vals = { user_id: userId, entity_id: ent, can_buy: !!canBuy, can_approve: !!canApprove, po_limit_zar: Number(poLimitZar) || 0 };
+  if (!row) { appendRow('UserEntities', vals); return 'added'; }
+  if (!overwrite) return 'kept';
+  const table = readTable('UserEntities');
+  Object.assign(row, vals);
+  sheet_('UserEntities').getRange(row._row, 1, 1, table.headers.length).setValues([table.headers.map(h => cell_(row[h]))]);
+  return 'updated';
+}
+
+/** Sets a PIN. Call it through setMyPin() from the editor, never with a PIN typed into code. */
+function setPin(email, pin) {
+  const user = findUserByEmail_(email);
+  if (!user) throw new AppError('NOT_FOUND', 'No user with that email.');
+  pin = String(pin === undefined || pin === null ? '' : pin).trim();
+  if (!/^\d{6}$/.test(pin)) throw new AppError('BAD_REQUEST', 'The PIN must be exactly 6 digits.');
+  if (isWeakPin_(pin)) throw new AppError('BAD_REQUEST', 'That PIN is too easy to guess (repeated or sequential digits). Choose another.');
+  const salt = newSalt_();
+  updateRowById('Users', 'user_id', user.user_id, {
+    pin_hash: hashPin_(salt, pin), pin_salt: salt, failed_attempts: 0, locked_until: '', pin_token_hash: '', pin_token_expires: '',
+  });
+  resetLoginLimits_(user.email);
+  auditLog({ userId: user.user_id, action: 'pin.set', ok: true, detail: { by: 'setup' } });
+  console.log('PIN set for ' + user.email + '.');
+}
+
+/**
+ * Run from the editor. Reads Script Properties SETPIN_EMAIL and SETPIN_PIN, sets the PIN, then
+ * deletes both properties whether or not it worked, so the PIN is never left behind.
+ */
+function setMyPin() {
+  const props = PropertiesService.getScriptProperties();
+  const email = props.getProperty('SETPIN_EMAIL');
+  const pin = props.getProperty('SETPIN_PIN');
+  try {
+    if (!email || !pin) throw new AppError('BAD_REQUEST', 'Add Script Properties SETPIN_EMAIL and SETPIN_PIN first.');
+    setPin(email, pin);
+  } finally {
+    props.deleteProperty('SETPIN_PIN');
+    props.deleteProperty('SETPIN_EMAIL');
+  }
+}
+
+/** Creates Dawie as admin with buy + approve on all three companies. Safe to run twice. */
+function seedAdmin() {
+  const missing = ADMIN_SEED.entities.filter(ent => !(Number(ADMIN_PO_LIMIT_ZAR[ent]) > 0));
+  if (missing.length) throw new AppError('SETUP_ORDER', 'ADMIN_PO_LIMIT_ZAR is not confirmed for ' + missing.join(', ') + '. Ask Dawie, set it in Setup.gs, push, then run seedAdmin().');
+  const user = createUser(ADMIN_SEED.name, ADMIN_SEED.email, ADMIN_SEED.role);
+  const out = ADMIN_SEED.entities.map(ent => ent + ': ' + grantEntity_(user.user_id, ent, true, true, ADMIN_PO_LIMIT_ZAR[ent], false));
+  console.log('seedAdmin: ' + ADMIN_SEED.email + ' ' + out.join(', ') + '. Now set your PIN with setMyPin().');
+}
+
+/** A buyer limited to NHP, for the Stage 3 access-control and lockout acceptance tests. */
+function createTestBuyerNHP() {
+  const user = createUser(TEST_BUYER.name, TEST_BUYER.email, TEST_BUYER.role);
+  if (!isTrue_(user.active)) updateRowById('Users', 'user_id', user.user_id, { active: true });
+  console.log('createTestBuyerNHP: ' + TEST_BUYER.entity + ' ' + grantEntity_(user.user_id, TEST_BUYER.entity, true, false, TEST_BUYER.poLimitZar, true) + '.');
+}
+
+/** Switches the test buyer off once testing is done (rows are kept for the audit trail). */
+function deactivateTestBuyer() {
+  const user = findUserByEmail_(TEST_BUYER.email);
+  if (!user) { console.log('No test buyer.'); return; }
+  updateRowById('Users', 'user_id', user.user_id, { active: false });
+  console.log('Test buyer deactivated.');
+}
+
+/** Clears a lockout early (e.g. after testing). Edit the email in unlockTestBuyer or call unlockUser(email). */
+function unlockUser(email) {
+  const user = findUserByEmail_(email);
+  if (user) updateRowById('Users', 'user_id', user.user_id, { failed_attempts: 0, locked_until: '' });
+  resetLoginLimits_(email);
+  console.log('Unlocked ' + normEmail_(email) + '.');
+}
+
+function unlockTestBuyer() { unlockUser(TEST_BUYER.email); }
+function unlockAdmin() { unlockUser(ADMIN_SEED.email); }

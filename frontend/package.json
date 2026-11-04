@@ -1,0 +1,18 @@
+{
+  "name": "po-desk-frontend",
+  "private": true,
+  "version": "0.3.0",
+  "type": "module",
+  "description": "PO Desk web app (static, built for Cloudflare Pages)",
+  "scripts": {
+    "build": "node scripts/copy-static.mjs && tailwindcss -i styles/app.css -o dist/app.css --minify",
+    "watch:css": "tailwindcss -i styles/app.css -o dist/app.css --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "4.3.3",
+    "tailwindcss": "4.3.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

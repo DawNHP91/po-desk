@@ -3,7 +3,7 @@
  */
 
 const APP = Object.freeze({
-  VERSION: '0.1.0-stage1',
+  VERSION: '0.3.0-stage3',
   TZ: 'Africa/Johannesburg',
 });
 

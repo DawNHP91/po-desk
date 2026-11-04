@@ -5,9 +5,15 @@
  * Apps Script cannot answer an OPTIONS preflight, so JSON content types would fail.
  */
 
-// Actions are added stage by stage. Each handler gets the parsed request and returns `data`.
+// Actions are added stage by stage. Handlers get (req, ctx); ctx is the verified session
+// ({ user, grants }) and is null only for public routes. Wrapped in arrows so functions defined
+// in other files are looked up at call time, not while this file loads.
 const ROUTES = {
-  ping: function () { return { pong: true, version: APP.VERSION }; },
+  ping: { public: true, fn: () => ({ pong: true, version: APP.VERSION }) },
+  login: { public: true, fn: (req) => actionLogin_(req) },
+  logout: { public: true, fn: (req) => actionLogout_(req) },
+  me: { fn: (req, ctx) => actionMe_(req, ctx) },
+  refData: { fn: (req, ctx) => actionRefData_(req, ctx) },
 };
 
 function doGet() {
@@ -18,9 +24,10 @@ function doPost(e) {
   let envelope;
   try {
     const req = parseRequest_(e);
-    const handler = Object.prototype.hasOwnProperty.call(ROUTES, req.action) ? ROUTES[req.action] : null;
-    if (!handler) throw new AppError('UNKNOWN_ACTION', 'Unknown action.');
-    envelope = { ok: true, data: handler(req) };
+    const route = Object.prototype.hasOwnProperty.call(ROUTES, req.action) ? ROUTES[req.action] : null;
+    if (!route) throw new AppError('UNKNOWN_ACTION', 'Unknown action.');
+    const ctx = route.public ? null : requireSession_(req.token);
+    envelope = { ok: true, data: route.fn(req, ctx) };
   } catch (err) {
     envelope = { ok: false, error: publicError_(err) };
   }

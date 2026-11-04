@@ -694,3 +694,137 @@ function testSyncGuards() {
 
   out_('testSyncGuards: ' + (failures ? failures + ' FAILURE(S)' : 'all ' + lines.length + ' passed'), lines.join('\n'));
 }
+
+// --- Stage 3: auth and access control (run after createTestBuyerNHP) -------------------------
+
+/** Sends a request through doPost exactly as the web app receives it. */
+function callApi_(action, token, payload) {
+  const out = doPost({ postData: { contents: JSON.stringify({ action: action, token: token || '', payload: payload === undefined ? {} : payload }) } });
+  return JSON.parse(out.getContent());
+}
+
+/** Acceptance: a buyer limited to NHP cannot get HPB (or PK) data however the request is edited. */
+function testAccessControl() {
+  const buyer = findUserByEmail_(TEST_BUYER.email);
+  if (!buyer) throw new AppError('SETUP_ORDER', 'Run createTestBuyerNHP() first.');
+  const lines = [];
+  let failures = 0;
+  const check = (label, cond, detail) => { if (!cond) failures++; lines.push((cond ? 'PASS ' : 'FAIL ') + label + (cond ? '' : ' -> ' + detail)); };
+  const wasActive = isTrue_(buyer.active);
+  if (!wasActive) updateRowById('Users', 'user_id', buyer.user_id, { active: true });
+  const token = createSession_(buyer.user_id);
+  const nhpSuppliers = readTable('Suppliers').rows.filter(r => r.entity_id === 'NHP').length;
+  const nhpCards = readTable('PaymentMethods').rows.filter(r => r.entity_id === 'NHP' && isTrue_(r.active)).length;
+  try {
+    const me = callApi_('me', token);
+    check('me lists NHP only', me.ok && me.data.companies.length === 1 && me.data.companies[0].entityId === 'NHP' && me.data.companies[0].canBuy === true, JSON.stringify(me).slice(0, 300));
+
+    const nhp = callApi_('refData', token, { entityId: 'NHP' });
+    check('refData NHP allowed, returns NHP suppliers (' + nhpSuppliers + ') and payment methods (' + nhpCards + ')',
+      nhp.ok && nhp.data.entityId === 'NHP' && nhp.data.suppliers.length === nhpSuppliers && nhp.data.paymentMethods.length === nhpCards, JSON.stringify(nhp).slice(0, 300));
+    check('refData exposes only pmId/type/label/last4 for payment methods',
+      nhp.ok && nhp.data.paymentMethods.every(p => Object.keys(p).sort().join() === 'label,last4,pmId,type'), nhp.ok ? JSON.stringify(nhp.data.paymentMethods) : '');
+    check('refData accounts are purchase accounts only', nhp.ok && nhp.data.accounts.length > 0 && nhp.data.accounts.every(a => ['EXPENSE', 'DIRECTCOSTS', 'OVERHEADS'].indexOf(a.type) !== -1), nhp.ok ? nhp.data.accounts.length + ' accounts' : '');
+
+    const forbidden = [
+      ['HPB', { entityId: 'HPB' }],
+      ['PK', { entityId: 'PK' }],
+      ['lower-case "hpb"', { entityId: 'hpb' }],
+      ['padded " HPB "', { entityId: ' HPB ' }],
+      ['HPB tenant ID instead of entity', { entityId: entityById_('HPB').xero_tenant_id }],
+      ['"NHP,HPB"', { entityId: 'NHP,HPB' }],
+      ['Nandrea tenant ID', { entityId: BLOCKED_TENANTS[0] }],
+    ];
+    forbidden.forEach(f => {
+      const r = callApi_('refData', token, f[1]);
+      check('refData ' + f[0] + ' -> FORBIDDEN', !r.ok && r.error.code === 'FORBIDDEN', JSON.stringify(r).slice(0, 200));
+    });
+    [['array ["NHP","HPB"]', { entityId: ['NHP', 'HPB'] }], ['object', { entityId: { id: 'HPB' } }], ['missing', {}], ['payload not an object', 'HPB']].forEach(f => {
+      const r = callApi_('refData', token, f[1]);
+      check('refData ' + f[0] + ' -> BAD_REQUEST', !r.ok && r.error.code === 'BAD_REQUEST', JSON.stringify(r).slice(0, 200));
+    });
+    const extra = callApi_('refData', token, { entityId: 'NHP', tenantId: entityById_('HPB').xero_tenant_id, entity_id: 'HPB', tenant_id: entityById_('HPB').xero_tenant_id });
+    check('extra HPB fields alongside entityId NHP are ignored (still NHP data)', extra.ok && extra.data.entityId === 'NHP' && extra.data.suppliers.length === nhpSuppliers, JSON.stringify(extra).slice(0, 200));
+
+    [['no token', ''], ['forged UUID token', Utilities.getUuid()], ['non-UUID token', 'admin'], ['token with HPB tenant ID', entityById_('HPB').xero_tenant_id]].forEach(t => {
+      const r = callApi_('refData', t[1], { entityId: 'NHP' });
+      check(t[0] + ' -> AUTH_REQUIRED', !r.ok && r.error.code === 'AUTH_REQUIRED', JSON.stringify(r).slice(0, 200));
+    });
+
+    updateRowById('Users', 'user_id', buyer.user_id, { active: false });
+    const off = callApi_('refData', token, { entityId: 'NHP' });
+    check('deactivated user is refused on the next request', !off.ok && off.error.code === 'AUTH_REQUIRED', JSON.stringify(off).slice(0, 200));
+    updateRowById('Users', 'user_id', buyer.user_id, { active: true });
+    const after = callApi_('me', token);
+    check('…and that session stays ended after reactivation', !after.ok && after.error.code === 'AUTH_REQUIRED', JSON.stringify(after).slice(0, 200));
+  } finally {
+    updateRowById('Users', 'user_id', buyer.user_id, { active: wasActive || true });
+    CacheService.getScriptCache().remove(sessionKey_(token));
+  }
+  out_('testAccessControl: ' + (failures ? failures + ' FAILURE(S)' : 'all ' + lines.length + ' passed'), lines.join('\n'));
+}
+
+/**
+ * Acceptance: 5 wrong PINs lock the account for 15 minutes, even against the right PIN.
+ * Uses a random PIN on the test buyer (never logged) and restores the buyer's own PIN afterwards.
+ */
+function testLockout() {
+  const buyer = findUserByEmail_(TEST_BUYER.email);
+  if (!buyer) throw new AppError('SETUP_ORDER', 'Run createTestBuyerNHP() first.');
+  const lines = [];
+  let failures = 0;
+  const check = (label, cond, detail) => { if (!cond) failures++; lines.push((cond ? 'PASS ' : 'FAIL ') + label + (cond ? '' : ' -> ' + detail)); };
+  const saved = { pin_hash: buyer.pin_hash, pin_salt: buyer.pin_salt, failed_attempts: buyer.failed_attempts, locked_until: buyer.locked_until, active: buyer.active };
+  const pin = randomStrongPin_();
+  let wrong = randomStrongPin_();
+  while (wrong === pin) wrong = randomStrongPin_();
+  const unknown = 'nobody.' + Utilities.getUuid().slice(0, 8) + '@po-desk.test';
+  const flood = 'flood.' + Utilities.getUuid().slice(0, 8) + '@po-desk.test';
+  resetLoginLimits_(TEST_BUYER.email);
+  try {
+    const salt = newSalt_();
+    updateRowById('Users', 'user_id', buyer.user_id, { pin_hash: hashPin_(salt, pin), pin_salt: salt, failed_attempts: 0, locked_until: '', active: true });
+    const login = (email, p) => callApi_('login', '', { email: email, pin: p });
+
+    for (let i = 1; i <= 4; i++) {
+      const r = login(TEST_BUYER.email, wrong);
+      check('wrong PIN ' + i + ' -> LOGIN_FAILED', !r.ok && r.error.code === 'LOGIN_FAILED', JSON.stringify(r));
+    }
+    const fifth = login(TEST_BUYER.email, wrong);
+    check('wrong PIN 5 -> LOCKED ("' + (fifth.error && fifth.error.message) + '")', !fifth.ok && fifth.error.code === 'LOCKED', JSON.stringify(fifth));
+    const right = login(TEST_BUYER.email, pin);
+    check('correct PIN while locked -> still LOCKED', !right.ok && right.error.code === 'LOCKED', JSON.stringify(right));
+    check('locked_until about 15 minutes ahead', (() => { const u = new Date(findUserByEmail_(TEST_BUYER.email).locked_until); const m = (u - new Date()) / 60000; return m > 14 && m <= 15.1; })(), String(findUserByEmail_(TEST_BUYER.email).locked_until));
+
+    updateRowById('Users', 'user_id', buyer.user_id, { locked_until: new Date(Date.now() - 1000) });
+    const ok = login(TEST_BUYER.email, pin);
+    check('after the lock expires the correct PIN works', ok.ok && isUuid_(ok.data.token) && ok.data.me.companies.length === 1, JSON.stringify(ok).slice(0, 200));
+    check('a successful login resets the failure count', Number(findUserByEmail_(TEST_BUYER.email).failed_attempts) === 0, String(findUserByEmail_(TEST_BUYER.email).failed_attempts));
+    if (ok.ok) {
+      const out = callApi_('logout', ok.data.token);
+      const gone = callApi_('me', ok.data.token);
+      check('logout ends the session', out.ok && !gone.ok && gone.error.code === 'AUTH_REQUIRED', JSON.stringify(gone));
+    }
+
+    const u4 = [1, 2, 3, 4].map(() => login(unknown, wrong));
+    const u5 = login(unknown, wrong);
+    check('unknown email answers like a real one (4 x LOGIN_FAILED, then LOCKED)', u4.every(r => !r.ok && r.error.code === 'LOGIN_FAILED') && !u5.ok && u5.error.code === 'LOCKED', JSON.stringify(u5));
+
+    const bad = [login(TEST_BUYER.email, '12345'), login(TEST_BUYER.email, 'abcdef'), login('', pin)];
+    check('malformed PIN or missing email rejected', bad.every(r => !r.ok && r.error.code === 'LOGIN_FAILED'), JSON.stringify(bad));
+
+    let last;
+    for (let i = 0; i <= AUTH.LOGIN_RATE_MAX; i++) last = login(flood, wrong);
+    check('attempt ' + (AUTH.LOGIN_RATE_MAX + 1) + ' in 15 minutes -> RATE_LIMITED', !last.ok && last.error.code === 'RATE_LIMITED', JSON.stringify(last));
+  } finally {
+    updateRowById('Users', 'user_id', buyer.user_id, saved);
+    [TEST_BUYER.email, unknown, flood].forEach(resetLoginLimits_);
+  }
+  out_('testLockout: ' + (failures ? failures + ' FAILURE(S)' : 'all ' + lines.length + ' passed'), lines.join('\n'));
+}
+
+function randomStrongPin_() {
+  let p;
+  do { p = String(Math.floor(Math.random() * 1e6)).padStart(6, '0'); } while (isWeakPin_(p));
+  return p;
+}
