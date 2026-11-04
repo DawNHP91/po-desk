@@ -560,6 +560,9 @@ function codingFixture_() {
       A('NHP', '318', 'Plant Raw Materials', 'DIRECTCOSTS', 'EXPENSE', 'INPUT'),
       A('NHP', '710', 'Office Equipment', 'FIXED', 'ASSET'),
       A('PK', '600', 'PK-only expense', 'EXPENSE'),
+      A('PK', '433', 'Vehicle - Petrol & Oil', 'EXPENSE'),
+      A('PK', '404', 'Factory hygiene', 'EXPENSE'),
+      A('PK', '465', 'Unallocated Expenses', 'EXPENSE', 'EXPENSE', 'NONE'),
     ],
     taxRates: [
       { entity_id: 'NHP', tax_type: 'INPUT3', rate: 15, status: 'ACTIVE' },
@@ -596,6 +599,14 @@ function testCoding() {
   const F = codingFixture_;
   const withConfig = patch => { const d = F(); Object.assign(d.config, patch); return d; };
   const run = (data, contact, cat, desc) => suggestAccountWith_(data, 'NHP', contact, cat, desc);
+  const runPK = (data, desc) => suggestAccountWith_(data, 'PK', null, null, desc);
+  // PK with its own words (or none) and NHP's words to borrow.
+  const FP = (own) => {
+    const d = F();
+    d.borrowed = mergeBorrowedWords_([{ name: 'NHP Global', index: d.words, accounts: d.accounts.filter(a => a.entity_id === 'NHP') }], d.accounts.filter(a => a.entity_id === 'PK'));
+    d.words = own;
+    return d;
+  };
   const cases = [
     // 1. supplier history
     ['history: unanimous supplier', () => run(F(), 'sup-fuel', null, 'whatever'), { source: 'history', accountCode: '433', reasonHas: 'Last 4 purchases' }],
@@ -624,6 +635,10 @@ function testCoding() {
     ['wrong company: default account that only exists in PK', () => run(withConfig({ defaultAccount: '600' }), null, null, 'x'), { source: 'none', accountCode: null }],
     // tax type
     ['tax: legacy 14% INPUT default replaced by INPUT3', () => run(F(), null, 'cat-raw', 'x'), { source: 'category', accountCode: '318', taxType: 'INPUT3' }],
+    // borrowed words: PK learns from NHP, only where the account has the same code and name
+    ['borrowed: PK gets NHP’s "diesel" -> 433 (same code, same name)', () => runPK(FP(null), 'diesel'), { source: 'borrowed', accountCode: '433', reasonHas: 'at NHP Global with “diesel”' }],
+    ['borrowed: an account with another name in PK is never suggested', () => runPK(FP(null), 'generator service'), { source: 'fallback', accountCode: '465' }],
+    ['borrowed: PK’s own words come first', () => runPK(FP(buildWordIndex_(Array(3).fill({ desc: 'Diesel spill kit', code: '404' }), 2)), 'diesel'), { source: 'words', accountCode: '404' }],
     // learned words (Stage 8)
     ['words: what past bills with "diesel" were coded to', () => run(F(), null, null, 'Diesel for the bakkie'), { source: 'words', accountCode: '433', reasonHas: '“diesel” went to 433' }],
     ['words: supplier history still comes first', () => run(F(), 'sup-fuel', null, 'stationery'), { source: 'history', accountCode: '433' }],

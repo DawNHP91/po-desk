@@ -2,7 +2,8 @@
  * Coding.gs — suggests the chart-of-accounts code for a purchase, and learns from the buyer's choice.
  *
  * Order (CLAUDE.md): 1 supplier history → 2 keyword rules → 3 learned words (past bills with the
- * same words) → 4 category default → 5 fallback.
+ * same words; then words borrowed from other companies, Config WORD_BORROW_<company>) → 4 category
+ * default → 5 fallback.
  * Every candidate must be an ACTIVE purchase account in THIS company's synced chart; anything else
  * (archived, another company's code, a balance-sheet account) is skipped, never returned.
  */
@@ -84,6 +85,7 @@ function codingData_(ent) {
     categories: readTable('Categories').rows.filter(r => r.entity_id === ent),
     history: readTable('SupplierHistory').rows.filter(r => r.entity_id === ent),
     words: wordIndexFor_(ent),
+    borrowed: borrowedWordIndex_(ent, ref.accounts),
     config: {
       historyN: Number(getConfig('SUPPLIER_HISTORY_N', 5)),
       defaultAccount: String(getConfig('DEFAULT_ACCOUNT_' + ent, '') || ''),
@@ -146,6 +148,13 @@ function suggestAccountWith_(data, ent, contactId, categoryId, description) {
     const w = wordSuggest_(data.words, desc, allowed, { minShare: data.config.wordMinShare });
     if (w) {
       return result(w.code, 'words', w.count + ' earlier bill line' + (w.count === 1 ? '' : 's') + ' with “' + w.word + '” went to ' + w.code + ' ' + allowed[w.code].name + '.', '', false);
+    }
+  }
+  // 3b. Borrowed: the same, from other companies' bills, only for accounts with the same code and name here.
+  if (desc && data.borrowed) {
+    const w = wordSuggest_(data.borrowed, desc, allowed, { minShare: data.config.wordMinShare });
+    if (w) {
+      return result(w.code, 'borrowed', w.count + ' bill line' + (w.count === 1 ? '' : 's') + ' at ' + (data.borrowed.from || []).join(' and ') + ' with “' + w.word + '” went to ' + w.code + ' ' + allowed[w.code].name + '.', '', false);
     }
   }
 
@@ -381,4 +390,56 @@ function wordIndexFromRows_(rows) {
     e[0] += Number(r.lines) || 0;
   });
   return index;
+}
+
+// --- Learned words borrowed from other companies --------------------------------------------------
+
+/**
+ * Pure. Other companies' word indexes merged into one, keeping only evidence for accounts that this
+ * company has with the same code AND the same name (so "433 Vehicle - Petrol and oil" carries over,
+ * a 404 that means something else here does not). sources: [{ name, index, accounts }].
+ * Returns { lines, w, from: [names] } or null.
+ */
+function mergeBorrowedWords_(sources, myAccounts) {
+  const mine = {};
+  (myAccounts || []).forEach(a => { if (a.status === 'ACTIVE' && a.code) mine[String(a.code)] = normAccountName_(a.name); });
+  const out = { lines: 0, w: {}, from: [] };
+  (sources || []).forEach(src => {
+    if (!src.index || !src.index.lines) return;
+    const theirs = {};
+    (src.accounts || []).forEach(a => { if (a.status === 'ACTIVE' && a.code) theirs[String(a.code)] = normAccountName_(a.name); });
+    out.lines += src.index.lines;
+    out.from.push(src.name);
+    Object.keys(src.index.w).forEach(word => {
+      const e = src.index.w[word];
+      const m = out.w[word] || (out.w[word] = [0, {}]);
+      m[0] += e[0];   // every line with the word counts, so a rare word stays rare
+      Object.keys(e[1]).forEach(code => { if (mine[code] && theirs[code] === mine[code]) m[1][code] = (m[1][code] || 0) + e[1][code]; });
+    });
+  });
+  return out.lines ? out : null;
+}
+
+function normAccountName_(name) {
+  return String(name || '').toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/** The borrowed index for this company (Config WORD_BORROW_<company>), cached per sync version. Never throws. */
+function borrowedWordIndex_(ent, accounts) {
+  try {
+    const from = String(getConfig('WORD_BORROW_' + ent, '') || '').split(/[,;\s]+/).map(s => s.trim().toUpperCase())
+      .filter((e, i, a) => e && e !== ent && a.indexOf(e) === i && ENTITY_SEED.some(x => x.entity_id === e));
+    if (!from.length) return null;
+    const props = PropertiesService.getScriptProperties();
+    const key = 'wordsb:' + ent + ':' + [ent].concat(from).map(e => e + (props.getProperty('WORDVER_' + e) || '0') + '.' + (props.getProperty('REFVER_' + e) || '0')).join('|');
+    const hit = cacheGetJson_(key);
+    if (hit) return hit.lines ? hit : null;
+    const sources = from.map(e => ({ name: entityById_(e).short_name, index: wordIndexFor_(e), accounts: getRefData(e).accounts }));
+    const merged = mergeBorrowedWords_(sources, (accounts || []).filter(a => a.entity_id === ent)) || { lines: 0, w: {}, from: [] };
+    cachePutJson_(key, merged);
+    return merged.lines ? merged : null;
+  } catch (err) {
+    console.warn('Borrowed words unavailable for ' + ent + ': ' + err.message);
+    return null;
+  }
 }

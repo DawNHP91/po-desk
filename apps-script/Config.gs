@@ -55,6 +55,11 @@ const CONFIG_DEFAULTS = Object.freeze({
   // Learned-word suggestions: the winning account's share of the evidence (backtest, NHP, 4 Nov 2026:
   // 0.6 was right 82–89% of the time it suggested; 0.5 suggests more often at 80%).
   WORD_MIN_SHARE: 0.6,
+  // Companies whose learned words another may borrow (only for accounts with the same code AND name in
+  // the borrower's chart; its own words come first). PK had 1 bill in 12 months (4 Nov 2026).
+  WORD_BORROW_HPB: '',
+  WORD_BORROW_NHP: '',
+  WORD_BORROW_PK: 'HPB,NHP',
 });
 
 class AppError extends Error {
