@@ -227,3 +227,86 @@ function planChoiceWrites_(ent, contactId, accountCode, freshRows, n) {
   if (fresh.length) reqs.push(appendReq_('SupplierHistory', fresh));
   return { reqs: reqs };
 }
+
+// --- Learned words: what past bills with similar descriptions were coded to -------------------
+//
+// From each company's own bills: for every word in a line's description, how many lines carried it
+// and which account each was coded to. A new description is scored word by word (rarer words count
+// more), so "diesel for the bakkie" leans on "diesel" and "bakkie" and ignores "for" and "the".
+// Pure functions here; the backtest is Tests.gs testWordSuggestions.
+
+const WORD_STOP = Object.freeze(['the', 'and', 'for', 'with', 'from', 'per', 'inv', 'invoice', 'ref', 'reference', 'qty', 'each',
+  'incl', 'excl', 'vat', 'total', 'subtotal', 'amount', 'pty', 'ltd', 'item', 'items', 'without', 'zero', 'rated', 'exempt',
+  'payment', 'paid', 'order', 'purchase', 'po', 'desk', 'account', 'monthly', 'month', 'date', 'no', 'nr', 'number']);
+
+/** Distinct meaningful words of a description: lower case, 3+ letters, no numbers or stop words, light plural folding. */
+function wordsOf_(text) {
+  const out = [];
+  String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').forEach(w => {
+    if (w.length < 3 || /^\d+$/.test(w) || /\d/.test(w) && w.length < 5) return;
+    const s = stemWord_(w);
+    if (WORD_STOP.indexOf(s) === -1 && WORD_STOP.indexOf(w) === -1 && out.indexOf(s) === -1) out.push(s);
+  });
+  return out;
+}
+
+function stemWord_(w) {
+  if (w.length > 4 && /ies$/.test(w)) return w.slice(0, -3) + 'y';
+  if (w.length > 4 && /(sses|shes|ches|xes)$/.test(w)) return w.slice(0, -2);
+  if (w.length > 3 && /[^su]s$/.test(w)) return w.slice(0, -1);
+  return w;
+}
+
+/**
+ * lines: [{ desc, code }] -> { lines: N, w: { word: [linesWithWord, { code: count }] } }, keeping only
+ * words seen on at least minLines lines (a word seen once can't be trusted, and it keeps the index small).
+ */
+function buildWordIndex_(lines, minLines) {
+  const w = {};
+  let n = 0;
+  lines.forEach(l => {
+    const code = String(l.code || '').trim();
+    const words = wordsOf_(l.desc);
+    if (!code || !words.length) return;
+    n++;
+    words.forEach(x => {
+      const e = w[x] || (w[x] = [0, {}]);
+      e[0]++;
+      e[1][code] = (e[1][code] || 0) + 1;
+    });
+  });
+  Object.keys(w).forEach(x => { if (w[x][0] < (minLines || 2)) delete w[x]; });
+  return { lines: n, w: w };
+}
+
+/**
+ * The account past lines with these words were coded to, if the evidence is strong enough:
+ * { code, word, count, share } or null. allowed: code -> account (only those can be suggested).
+ * opts: { minLines: lines that must back the winning word (default 2), minShare: the winner's share
+ * of all the evidence (default 0.6) }.
+ */
+function wordSuggest_(index, description, allowed, opts) {
+  opts = opts || {};
+  const minLines = opts.minLines || 2;
+  const minShare = opts.minShare === undefined ? 0.6 : opts.minShare;
+  if (!index || !index.w) return null;
+  const scores = {};
+  const why = {};
+  wordsOf_(description).forEach(x => {
+    const e = index.w[x];
+    if (!e) return;
+    const idf = Math.log(1 + index.lines / e[0]);
+    Object.keys(e[1]).forEach(code => {
+      if (allowed && !allowed[code]) return;
+      scores[code] = (scores[code] || 0) + idf * e[1][code] / e[0];
+      if (!why[code] || e[1][code] > why[code].count) why[code] = { word: x, count: e[1][code] };
+    });
+  });
+  const codes = Object.keys(scores).sort((a, b) => scores[b] - scores[a]);
+  if (!codes.length) return null;
+  const total = codes.reduce((s, c) => s + scores[c], 0);
+  const best = codes[0];
+  const share = scores[best] / total;
+  if (why[best].count < minLines || share < minShare) return null;
+  return { code: best, word: why[best].word, count: why[best].count, share: Math.round(share * 100) / 100 };
+}

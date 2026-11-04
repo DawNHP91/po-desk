@@ -1254,3 +1254,98 @@ function checkEmail() {
     'Recent emails (AuditLog):\n' + table_(rows, ['when', 'action', 'to', 'emailed']) +
     '\n\nPeople waiting for a PIN link:\n' + table_(readTable('Users').rows.filter(u => u.pin_token_hash).map(u => ({ email: u.email, active: String(u.active), linkExpires: u.pin_token_expires ? Utilities.formatDate(new Date(u.pin_token_expires), APP.TZ, 'd MMM HH:mm') : '' })), ['email', 'active', 'linkExpires']));
 }
+
+// --- Learned-word suggestions: backtest on the real bills (changes nothing) ---------------------
+
+function testWordSuggestions_NHP() { testWordSuggestions('NHP'); }
+function testWordSuggestions_HPB() { testWordSuggestions('HPB'); }
+function testWordSuggestions_PK() { testWordSuggestions('PK'); }
+
+/**
+ * Would learned words have suggested the right account? Fetches the company's bill lines of the last
+ * 12 months (as the nightly sync does), learns from the oldest 80% and predicts the newest 20%, and
+ * compares that with today's engine (supplier history, else the fallback account).
+ */
+function testWordSuggestions(entity) {
+  const e = entityById_(entity || 'NHP');
+  const ent = e.entity_id;
+  const t = e.xero_tenant_id;
+  const ctx = { ref: 'test:words' };
+  const t0 = Date.now();
+  const since = new Date();
+  since.setMonth(since.getMonth() - BILL_HISTORY_MONTHS);
+  const where = 'Type=="ACCPAY" AND Date>=DateTime(' + Utilities.formatDate(since, APP.TZ, 'yyyy,MM,dd') + ')';
+  const bills = xeroListAllPages('XERO_LIST_INVOICES', t, { where: where, Statuses: 'SUBMITTED,AUTHORISED,PAID' }, 'Invoices',
+    { ctx: ctx, deadline: Date.now() + 5 * 60000, tenantParam: 'tenantId' });
+  const data = codingData_(ent);
+  const allowed = allowedAccounts_(data, ent);
+  const fallback = data.config.defaultAccount;
+  const all = [];
+  bills.forEach(b => {
+    const date = xeroDate_(b.DateString || b.Date);
+    const contactId = b.Contact && b.Contact.ContactID;
+    (b.LineItems || []).forEach(l => {
+      const code = String(l.AccountCode || '').trim();
+      if (code && date && contactId) all.push({ date: date, contactId: contactId, desc: String(l.Description || ''), code: code });
+    });
+  });
+  // PO Desk only ever suggests the purchase accounts a buyer may choose.
+  const usable = all.filter(l => allowed[l.code]).sort((a, b) => a.date - b.date);
+  const withWords = usable.filter(l => wordsOf_(l.desc).length).length;
+  const cut = Math.floor(usable.length * 0.8);
+  const train = usable.slice(0, cut);
+  const test = usable.slice(cut);
+  const index = buildWordIndex_(train, 2);
+  const histOf = {};
+  buildSupplierHistory_(train.map(l => ({ contactId: l.contactId, date: l.date, codes: [l.code] })), data.config.historyN)
+    .forEach(h => { (histOf[h.contact_id] = histOf[h.contact_id] || []).push(h); });
+  const fromHistory = (l) => { const rows = histOf[l.contactId] || []; return rows.length === 1 ? String(rows[0].account_code) : null; };
+  const fromWords = (l, share) => { const w = wordSuggest_(index, l.desc, allowed, { minShare: share }); return w ? w.code : null; };
+
+  const pct = (a, b) => (b ? Math.round(a / b * 100) + '%' : '-');
+  const engines = [];
+  const run = (name, pick) => {
+    let made = 0;
+    let right = 0;
+    const by = {};
+    test.forEach(l => {
+      const p = pick(l);
+      if (!p || !p.code) return;
+      made++;
+      const ok = p.code === l.code;
+      if (ok) right++;
+      const b = by[p.from] || (by[p.from] = { n: 0, ok: 0 });
+      b.n++;
+      if (ok) b.ok++;
+    });
+    engines.push({ engine: name, suggests: pct(made, test.length), rightWhenItSuggests: pct(right, made), rightOverall: pct(right, test.length), 'right/made by step': Object.keys(by).map(k => k + ' ' + by[k].ok + '/' + by[k].n).join(', ') });
+  };
+  run('today: supplier history, else ' + fallback, l => { const h = fromHistory(l); return { code: h || fallback, from: h ? 'history' : 'fallback' }; });
+  [0.5, 0.6, 0.7, 0.8].forEach(s => run('words only, share >= ' + s, l => { const w = fromWords(l, s); return w ? { code: w, from: 'words' } : null; }));
+  run('NEW: history, else words (0.6), else ' + fallback, l => {
+    const h = fromHistory(l); if (h) return { code: h, from: 'history' };
+    const w = fromWords(l, 0.6); return w ? { code: w, from: 'words' } : { code: fallback, from: 'fallback' };
+  });
+  run('alt: words (0.6), else history, else ' + fallback, l => {
+    const w = fromWords(l, 0.6); if (w) return { code: w, from: 'words' };
+    const h = fromHistory(l); return h ? { code: h, from: 'history' } : { code: fallback, from: 'fallback' };
+  });
+
+  const name = (code) => code + ' ' + (allowed[code] ? allowed[code].name : '');
+  const top = Object.keys(index.w).sort((a, b) => index.w[b][0] - index.w[a][0]).slice(0, 15).map(x => {
+    const ew = index.w[x];
+    const code = Object.keys(ew[1]).sort((a, b) => ew[1][b] - ew[1][a])[0];
+    return { word: x, lines: ew[0], mostlyCodedTo: name(code), share: pct(ew[1][code], ew[0]) };
+  });
+  const misses = test.map(l => ({ l: l, w: wordSuggest_(index, l.desc, allowed, { minShare: 0.6 }) })).filter(x => x.w && x.w.code !== x.l.code).slice(0, 8)
+    .map(x => ({ description: truncate_(x.l.desc, 45), suggested: x.w.code + ' (from "' + x.w.word + '")', actual: name(x.l.code) }));
+  const sample = test.slice(-8).map(l => ({ description: truncate_(l.desc.replace(/\s+/g, ' '), 55), account: name(l.code) }));
+  out_('testWordSuggestions ' + ent + ' (' + Math.round((Date.now() - t0) / 1000) + ' s)',
+    'Bill lines in the last ' + BILL_HISTORY_MONTHS + ' months: ' + all.length + '; on purchase accounts a buyer can choose: ' + usable.length +
+    ' (' + pct(withWords, usable.length) + ' have a usable description).\n' +
+    'Learned from the oldest ' + train.length + ' lines (' + Object.keys(index.w).length + ' words seen on 2+ lines); tested on the newest ' + test.length + '.\n\n' +
+    table_(engines, ['engine', 'suggests', 'rightWhenItSuggests', 'rightOverall', 'right/made by step']) +
+    '\n\nMost used words:\n' + table_(top, ['word', 'lines', 'mostlyCodedTo', 'share']) +
+    '\n\nWords got these wrong (first 8):\n' + table_(misses, ['description', 'suggested', 'actual']) +
+    '\n\nWhat recent descriptions look like:\n' + table_(sample, ['description', 'account']));
+}
