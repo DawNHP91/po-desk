@@ -3,7 +3,7 @@
  */
 
 const APP = Object.freeze({
-  VERSION: '0.4.1-stage4',
+  VERSION: '0.5.0-stage5',
   TZ: 'Africa/Johannesburg',
 });
 
@@ -25,7 +25,10 @@ const CONFIG_DEFAULTS = Object.freeze({
   VARIANCE_ZAR: 500,
   SUPPLIER_HISTORY_N: 5,
   VAT_FULL_INVOICE_ZAR: 5000,
-  GEMINI_MODEL: 'gemini-2.5-flash',
+  // gemini-2.5-flash is retired on 1 Dec 2026; 3.6 Flash is the current stable Flash (checked 4 Nov 2026).
+  GEMINI_MODEL: 'gemini-3.6-flash',
+  OCR_MIN_CONFIDENCE: 0.7,
+  SLIP_DATE_TOLERANCE_DAYS: 3,
   // Same codes in all three SA orgs (inspectCharts, 3 Nov 2026). Plain INPUT is the OLD 14% rate
   // and is DELETED in NHP, so never rely on an account's default tax type. Confirm with the accountant.
   PURCHASE_TAX_TYPE: 'INPUT3',

@@ -1,6 +1,6 @@
 // New PO (Flow 1 steps 2–4): payment method, supplier, what, amount, category, account.
 // The server re-checks everything; this screen only makes the right answer the easy one.
-import { h, fill, alertBox, rand, uuid, inputClass, labelClass } from './ui.js';
+import { h, fill, alertBox, rand, uuid, inputClass, labelClass, parseAmount } from './ui.js';
 import { call } from '../api.js';
 import { remember } from './po.js';
 
@@ -11,15 +11,6 @@ const SUGGEST_DELAY_MS = 600;
 const MAYBE_CREATED = ['TIMEOUT', 'NETWORK', 'BAD_RESPONSE', 'BUSY', 'INTERNAL'];
 
 const pmText = (pm) => (pm.type === 'CARD' && pm.last4 ? `${pm.label} ••${pm.last4}` : pm.label);
-
-/** Accepts 1234.5, 1 234,50 and 1,234.50; returns cents-rounded number or NaN. */
-function parseAmount(v) {
-  let s = String(v || '').replace(/[R\s]/gi, '');
-  if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) s = s.replace(/,/g, '');
-  else s = s.replace(',', '.');
-  if (!/^\d+(\.\d{1,2})?$/.test(s)) return NaN;
-  return Math.round(Number(s) * 100) / 100;
-}
 
 export function render(root, ctx) {
   const { auth } = ctx;

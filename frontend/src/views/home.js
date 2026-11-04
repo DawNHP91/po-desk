@@ -1,4 +1,4 @@
-// Home: the main actions for the chosen company. Add slip and Approvals arrive in later stages.
+// Home: the main actions for the chosen company. Approvals arrives in a later stage.
 import { h, icon, alertBox } from './ui.js';
 
 const ICONS = {
@@ -36,7 +36,7 @@ export function render(root, ctx) {
   if (company) {
     tiles.push(
       tile('New PO', 'Get a PO number', ICONS.newPo, () => ctx.go('/po/new')),
-      tile('Add slip', 'Photograph a till slip', ICONS.slip, soon('Add slip')),
+      tile('Add slip', 'Photograph a till slip', ICONS.slip, () => ctx.go('/slips')),
       tile('My POs', 'Numbers and status', ICONS.list, () => ctx.go('/pos')),
     );
   }

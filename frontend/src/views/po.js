@@ -93,10 +93,27 @@ export function render(root, ctx, params) {
         row('Date', fmtDate(po.createdAt)),
       ),
       po.status === 'PENDING_XERO' ? h('button', { type: 'button', class: 'mt-4 w-full rounded-2xl border-2 border-slate-300 bg-white px-4 py-3 text-base font-semibold active:bg-slate-100', onclick: load }, 'Check again') : null,
+      slipSection(po),
       h('div', { class: 'mt-6 grid grid-cols-2 gap-3' },
         h('button', { type: 'button', class: 'rounded-2xl bg-brand px-4 py-4 text-base font-semibold text-white active:opacity-90', onclick: () => ctx.go('/po/new') }, 'New PO'),
         h('button', { type: 'button', class: 'rounded-2xl border-2 border-slate-300 bg-white px-4 py-4 text-base font-semibold active:bg-slate-100', onclick: () => ctx.go('/pos') }, 'My POs')),
     );
+  }
+
+  // Once bought, the slip: photograph it, finish checking it, or see that it is saved.
+  function slipSection(po) {
+    if (po.status !== 'ISSUED' && !(po.slip && po.slip.reviewed)) return null;
+    const btn = 'w-full rounded-2xl px-4 py-4 text-base font-semibold touch-manipulation';
+    if (!po.slip) {
+      return h('button', { type: 'button', class: btn + ' mt-4 bg-brand text-white active:opacity-90', onclick: () => ctx.go('/po/' + po.poId + '/slip') }, 'Photograph the slip');
+    }
+    if (!po.slip.reviewed) {
+      return h('div', { class: 'mt-4 grid grid-cols-2 gap-3' },
+        h('button', { type: 'button', class: btn + ' bg-brand text-white active:opacity-90', onclick: () => ctx.go('/slip/' + po.slip.billId) }, 'Check the slip'),
+        h('button', { type: 'button', class: btn + ' border-2 border-slate-300 bg-white active:bg-slate-100', onclick: () => ctx.go('/po/' + po.poId + '/slip') }, 'Retake photo'));
+    }
+    return h('button', { type: 'button', class: 'mt-4 flex w-full items-center justify-between rounded-2xl bg-white px-4 py-4 text-left ring-1 ring-slate-200 active:bg-slate-50', onclick: () => ctx.go('/slip/' + po.slip.billId) },
+      h('span', { class: 'font-semibold text-green-800' }, 'Slip saved ✓'), h('span', { class: 'text-brand' }, po.slip.billed ? 'View' : 'View or correct'));
   }
 
   return () => { alive = false; };

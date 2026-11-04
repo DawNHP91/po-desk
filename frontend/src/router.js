@@ -8,6 +8,9 @@ import * as homeView from './views/home.js';
 import * as newPoView from './views/newpo.js';
 import * as poView from './views/po.js';
 import * as myPosView from './views/mypos.js';
+import * as slipsView from './views/slips.js';
+import * as slipView from './views/slip.js';
+import * as reviewView from './views/review.js';
 
 // company: the screen works inside the chosen company, so it shows the "Buying for" bar and
 // sends the user to the picker first if no company is chosen yet.
@@ -18,6 +21,9 @@ const ROUTES = [
   { re: /^\/po\/new$/, view: newPoView, signedIn: true, company: true },
   { re: /^\/pos$/, view: myPosView, signedIn: true, company: true },
   { re: /^\/po\/([0-9a-f-]{36})$/, view: poView, signedIn: true, company: true },
+  { re: /^\/slips$/, view: slipsView, signedIn: true, company: true },
+  { re: /^\/po\/([0-9a-f-]{36})\/slip$/, view: slipView, signedIn: true, company: true },
+  { re: /^\/slip\/([0-9a-f-]{36})$/, view: reviewView, signedIn: true, company: true },
 ];
 
 const app = document.getElementById('app');

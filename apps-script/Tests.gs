@@ -906,6 +906,12 @@ function cleanupTestPOs() {
   });
 
   const poIds = targets.map(r => r.po_id);
+  // Slips of test POs: photos to the bin, Bills rows removed.
+  invalidateTable_('Bills');
+  const testBills = readTable('Bills').rows.filter(b => poIds.indexOf(b.po_id) !== -1);
+  testBills.forEach(b => { if (b.drive_file_id) trashSlip_(b.drive_file_id); });
+  testBills.map(b => b._row).sort((a, b) => b - a).forEach(n => sheet_('Bills').deleteRow(n));
+  invalidateTable_('Bills');
   invalidateTable_('Queue');
   readTable('Queue').rows.filter(j => poIds.some(id => String(j.payload_json).indexOf(id) !== -1)).map(j => j._row)
     .sort((a, b) => b - a).forEach(n => sheet_('Queue').deleteRow(n));
@@ -929,7 +935,7 @@ function cleanupTestPOs() {
   if (supRows.length) invalidateRefCache(ent);
 
   out_('cleanupTestPOs', table_(report, ['po', 'amount', 'was', 'xero', 'row']) + '\n\nContacts: ' + (contacts.join('; ') || 'none') +
-    '\nQueue jobs removed for ' + poIds.length + ' PO(s); supplier history cleared; Suppliers rows removed: ' + supRows.length + '.');
+    '\nQueue jobs removed for ' + poIds.length + ' PO(s); slips removed: ' + testBills.length + '; supplier history cleared; Suppliers rows removed: ' + supRows.length + '.');
 }
 
 /**
@@ -989,4 +995,115 @@ function testFastSheets() {
     check('fast write', false, err.message);
   }
   out_('testFastSheets: ' + (failures ? failures + ' FAILURE(S)' : 'all passed') + ' (sheet timezone ' + (dbCache_.tz || '?') + ')', lines.join('\n'));
+}
+
+// --- Stage 5: slip-reading accuracy test ------------------------------------------------------
+// Put slip photos in Drive under PO Desk/_test. runSlipTest() reads each one at 1600 px (what the
+// app sends) and writes a "SlipTest" tab. Fill the true_* columns ("ok" = the read value is right,
+// "none" = not on the slip), then scoreSlipTest() reports accuracy per field.
+
+const SLIP_TEST_TAB = 'SlipTest';
+const SLIP_TEST_COLS = ['file', 'sent', 'model', 'ms', 'status', 'reason', 'supplier', 'date', 'total', 'vat', 'vat_number', 'slip_number', 'lines', 'low_confidence', 'checks',
+  'true_supplier', 'true_date', 'true_total', 'true_vat', 'true_vat_number', 'true_slip_number'];
+
+function runSlipTest() {
+  const root = DriveApp.getFolderById(getSecret_('DRIVE_ROOT_ID'));
+  const it = root.getFoldersByName('_test');
+  if (!it.hasNext()) throw new AppError('SETUP_ORDER', 'Create a folder "_test" inside PO Desk and put the slip photos in it.');
+  const files = [];
+  const fit = it.next().getFiles();
+  while (fit.hasNext()) { const f = fit.next(); if (/^image\//.test(f.getMimeType())) files.push(f); }
+  files.sort((a, b) => a.getName().localeCompare(b.getName()));
+  if (!files.length) throw new AppError('SETUP_ORDER', 'No images in PO Desk/_test.');
+
+  const ss = db_();
+  const sh = ss.getSheetByName(SLIP_TEST_TAB) || ss.insertSheet(SLIP_TEST_TAB);
+  const prev = {};
+  if (sh.getLastRow() > 1) {
+    const vals = sh.getRange(1, 1, sh.getLastRow(), sh.getLastColumn()).getValues();
+    const h = vals[0].map(String);
+    vals.slice(1).forEach(r => { const o = {}; h.forEach((k, i) => { o[k] = r[i]; }); prev[o.file] = o; });
+  }
+  const rows = [];
+  files.forEach((file, i) => {
+    if (i > 0) Utilities.sleep(6500);   // stay well under free-tier requests-per-minute limits
+    const sized = slipTestImage_(file);
+    const r = extractSlipFromBlob_(sized.blob, { ref: 'slip-test:' + file.getName() });
+    const f = r.fields || {};
+    const keep = prev[file.getName()] || {};
+    rows.push([file.getName(), sized.note, r.model, r.ms, r.status, r.reason || '', f.supplierName || '', f.date || '', f.totalIncl === null || f.totalIncl === undefined ? '' : f.totalIncl,
+      f.vatAmount === null || f.vatAmount === undefined ? '' : f.vatAmount, f.supplierVatNumber || '', f.slipNumber || '', (f.lineItems || []).length,
+      (r.lowConfidence || []).join(', '), (r.checks || []).map(c => c.code).join(', '),
+      keep.true_supplier || '', keep.true_date || '', keep.true_total || '', keep.true_vat || '', keep.true_vat_number || '', keep.true_slip_number || '']);
+    console.log((i + 1) + '/' + files.length + ' ' + file.getName() + ': ' + r.status + ' ' + (f.supplierName || '-') + ' | ' + (f.date || '-') + ' | ' + (f.totalIncl == null ? '-' : f.totalIncl) + ' (' + r.ms + ' ms, ' + sized.note + ')');
+  });
+  sh.clear();
+  sh.getRange(1, 1, 1, SLIP_TEST_COLS.length).setValues([SLIP_TEST_COLS]).setFontWeight('bold');
+  // Text format, so typed truths like 03/11/2026 or 0123 are never reinterpreted.
+  sh.getRange(1, 1, Math.max(rows.length + 1, 50), SLIP_TEST_COLS.length).setNumberFormat('@');
+  sh.getRange(2, 1, rows.length, SLIP_TEST_COLS.length).setValues(rows.map(r => r.map(v => typeof v === 'number' ? String(v) : v)));
+  sh.setFrozenRows(1);
+  out_('runSlipTest: ' + rows.length + ' slip(s) read', 'Results are in the "' + SLIP_TEST_TAB + '" tab. Fill the true_* columns ("ok" if the read value is right, "none" if it is not on the slip), then run scoreSlipTest().');
+}
+
+/** A 1600 px rendition from Drive, like the app's downscale; falls back to the original if Drive has none. */
+function slipTestImage_(file) {
+  try {
+    const token = ScriptApp.getOAuthToken();
+    const meta = JSON.parse(UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/' + file.getId() + '?fields=thumbnailLink', { headers: { Authorization: 'Bearer ' + token } }).getContentText());
+    if (!meta.thumbnailLink) throw new Error('no thumbnail');
+    const res = UrlFetchApp.fetch(meta.thumbnailLink.replace(/=s\d+$/, '=s1600'), { headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) throw new Error('thumbnail ' + res.getResponseCode());
+    const blob = res.getBlob();
+    return { blob: blob.setContentType(blob.getContentType() || 'image/jpeg'), note: '1600px ' + Math.round(blob.getBytes().length / 1024) + ' KB' };
+  } catch (err) {
+    const blob = file.getBlob();
+    if (blob.getBytes().length > 15 * 1024 * 1024) throw new AppError('TOO_LARGE', file.getName() + ' is over 15 MB and Drive has no smaller rendition.');
+    return { blob: blob, note: 'original ' + Math.round(blob.getBytes().length / 1024) + ' KB (' + err.message + ')' };
+  }
+}
+
+function scoreSlipTest() {
+  const sh = db_().getSheetByName(SLIP_TEST_TAB);
+  if (!sh || sh.getLastRow() < 2) throw new AppError('SETUP_ORDER', 'Run runSlipTest() first.');
+  const vals = sh.getRange(1, 1, sh.getLastRow(), sh.getLastColumn()).getValues();
+  const h = vals[0].map(String);
+  const rows = vals.slice(1).map(r => { const o = {}; h.forEach((k, i) => { o[k] = r[i] instanceof Date ? Utilities.formatDate(r[i], APP.TZ, 'yyyy-MM-dd') : String(r[i]).trim(); }); return o; });
+  const isoOf = (t) => { const m = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/.exec(t); if (m) { const y = m[3].length === 2 ? '20' + m[3] : m[3]; return y + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0'); } return t.slice(0, 10); };
+  const none = (t) => /^(none|-|n\/a|na)$/i.test(t);
+  const FIELDS = {
+    supplier: (x, t) => namesMatch_(x, t),
+    date: (x, t) => x === isoOf(t),
+    total: (x, t) => x !== '' && Math.abs(parseAmount_(x) - parseAmount_(t)) < 0.005,
+    vat: (x, t) => (none(t) ? x === '' : x !== '' && Math.abs(parseAmount_(x) - parseAmount_(t)) < 0.005),
+    vat_number: (x, t) => (none(t) ? x === '' : x === t.replace(/\D/g, '')),
+    slip_number: (x, t) => (none(t) ? x === '' : x.replace(/\s+/g, '').toLowerCase() === t.replace(/\s+/g, '').toLowerCase()),
+  };
+  const tally = {};
+  Object.keys(FIELDS).forEach(k => { tally[k] = { right: 0, n: 0, wrong: [] }; });
+  let keyAllRight = 0;
+  let keyScored = 0;
+  const perSlip = rows.map(r => {
+    const res = {};
+    Object.keys(FIELDS).forEach(k => {
+      const t = r['true_' + k];
+      if (!t) { res[k] = ''; return; }
+      const ok = /^ok$/i.test(t) || FIELDS[k](r[k], t);
+      tally[k].n++;
+      if (ok) tally[k].right++; else tally[k].wrong.push(r.file + ' (read "' + r[k] + '", true "' + t + '")');
+      res[k] = ok ? '✓' : '✗';
+    });
+    if (res.supplier && res.date && res.total) { keyScored++; if (res.supplier === '✓' && res.date === '✓' && res.total === '✓') keyAllRight++; }
+    return Object.assign({ file: r.file, status: r.status }, res);
+  });
+  const summary = Object.keys(FIELDS).map(k => ({ field: k, accuracy: tally[k].n ? tally[k].right + '/' + tally[k].n + ' (' + Math.round(tally[k].right / tally[k].n * 100) + '%)' : 'not scored' }));
+  out_('scoreSlipTest: supplier + date + total all right on ' + keyAllRight + ' of ' + keyScored + ' slips' + (keyScored ? (keyAllRight >= Math.ceil(keyScored * 0.8) ? ' (meets 8 of 10)' : ' (BELOW 8 of 10)') : ''),
+    table_(summary, ['field', 'accuracy']) + '\n\n' + table_(perSlip, ['file', 'status', 'supplier', 'date', 'total', 'vat', 'vat_number', 'slip_number']) +
+    '\n\nWrong:\n' + Object.keys(FIELDS).map(k => tally[k].wrong.map(w => '  ' + k + ': ' + w).join('\n')).filter(Boolean).join('\n'));
+}
+
+/** Arms a one-shot "Gemini unavailable" for the next slip read, to test typing the slip by hand. */
+function armGeminiFailure() {
+  PropertiesService.getScriptProperties().setProperty('TEST_FAIL_GEMINI', '1');
+  console.log('Armed: the next slip read returns "read manually".');
 }

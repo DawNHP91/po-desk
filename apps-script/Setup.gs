@@ -58,6 +58,9 @@ function setupSheets() {
   });
   // APP_VERSION tracks the deployed code, so it is the one key setup keeps current.
   updateRowById('Config', 'key', 'APP_VERSION', { value: APP.VERSION });
+  // Retired model still at its old default (never customised): move it to the current default.
+  const gm = findBy('Config', 'key', 'GEMINI_MODEL')[0];
+  if (gm && String(gm.value) === 'gemini-2.5-flash') { updateRowById('Config', 'key', 'GEMINI_MODEL', { value: CONFIG_DEFAULTS.GEMINI_MODEL }); configAdded.push('GEMINI_MODEL -> ' + CONFIG_DEFAULTS.GEMINI_MODEL); }
 
   const entitiesAdded = [];
   ENTITY_SEED.forEach(e => {

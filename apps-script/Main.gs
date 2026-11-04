@@ -19,8 +19,12 @@ const ROUTES = {
   suggest: { tabs: AUTH_TABS.concat(['Categories', 'SupplierHistory']), fn: (req, ctx) => actionSuggest_(req, ctx) },
   createSupplier: { tabs: AUTH_TABS, fn: (req, ctx) => actionCreateSupplier_(req, ctx) },
   createPO: { tabs: AUTH_TABS.concat(['PaymentMethods', 'Categories', 'SupplierHistory', 'POs']), fn: (req, ctx) => actionCreatePO_(req, ctx) },
-  listPOs: { tabs: AUTH_TABS.concat(['POs', 'PaymentMethods']), fn: (req, ctx) => actionListPOs_(req, ctx) },
-  getPO: { tabs: AUTH_TABS.concat(['POs', 'PaymentMethods']), fn: (req, ctx) => actionGetPO_(req, ctx) },
+  listPOs: { tabs: AUTH_TABS.concat(['POs', 'PaymentMethods', 'Bills']), fn: (req, ctx) => actionListPOs_(req, ctx) },
+  getPO: { tabs: AUTH_TABS.concat(['POs', 'PaymentMethods', 'Bills']), fn: (req, ctx) => actionGetPO_(req, ctx) },
+  uploadSlip: { tabs: AUTH_TABS.concat(['POs', 'Bills']), fn: (req, ctx) => actionUploadSlip_(req, ctx) },
+  readSlip: { tabs: AUTH_TABS.concat(['POs', 'Bills']), fn: (req, ctx) => actionReadSlip_(req, ctx) },
+  getSlip: { tabs: AUTH_TABS.concat(['POs', 'Bills']), fn: (req, ctx) => actionGetSlip_(req, ctx) },
+  saveSlipReview: { tabs: AUTH_TABS.concat(['POs', 'Bills']), fn: (req, ctx) => actionSaveSlipReview_(req, ctx) },
 };
 
 const PO_STATUS = Object.freeze({
@@ -363,11 +367,12 @@ function actionListPOs_(req, ctx) {
   const ent = requireBuyer_(ctx, req.payload.entityId);
   const data = { accounts: getRefData(ent).accounts };
   const pms = pmIndex_();
+  const bills = billIndex_();
   const rows = readTable('POs').rows
     .filter(r => r.entity_id === ent && String(r.buyer_user_id) === String(ctx.user.user_id) && r.status)
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
     .slice(0, 50);
-  return { entityId: ent, pos: rows.map(r => poView_(r, data, pms[r.pm_id])) };
+  return { entityId: ent, pos: rows.map(r => poView_(r, data, pms[r.pm_id], bills[r.po_id])) };
 }
 
 function actionGetPO_(req, ctx) {
@@ -378,11 +383,11 @@ function actionGetPO_(req, ctx) {
   // Approvers of that company may look too (they will act on it in Approvals). Anyone else gets
   // "not found", so PO IDs can't be probed across companies.
   if (!row || !g || !(mine || g.canApprove || ctx.user.role === 'admin')) throw new AppError('NOT_FOUND', 'PO not found.');
-  return poView_(row, { accounts: getRefData(row.entity_id).accounts }, pmIndex_()[row.pm_id]);
+  return poView_(row, { accounts: getRefData(row.entity_id).accounts }, pmIndex_()[row.pm_id], billIndex_()[row.po_id]);
 }
 
-/** The PO as the browser sees it. No internal IDs beyond poId; no bank account details. */
-function poView_(row, data, pm) {
+/** The PO as the browser sees it. No internal IDs beyond poId/billId; no bank account details. */
+function poView_(row, data, pm, bill) {
   const acct = (data.accounts || []).find(a => String(a.code) === String(row.account_code));
   return {
     poId: row.po_id,
@@ -397,7 +402,18 @@ function poView_(row, data, pm) {
     accountName: acct ? String(acct.name) : '',
     paidWith: pm ? (pm.type === 'CARD' && pm.last4 ? pm.label + ' ••' + pm.last4 : String(pm.label)) : '',
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    slip: bill ? { billId: bill.bill_id, reviewed: Number(bill.total_incl_zar) > 0, billed: !!bill.xero_invoice_id } : null,
   };
+}
+
+/** po_id -> its latest Bills row. */
+function billIndex_() {
+  const out = {};
+  readTable('Bills').rows.forEach(b => {
+    const cur = out[b.po_id];
+    if (!cur || new Date(b.created_at) > new Date(cur.created_at)) out[b.po_id] = b;
+  });
+  return out;
 }
 
 function pmIndex_() {
@@ -435,4 +451,277 @@ function stepTimer_(ctx) {
     mark: (name) => { const n = Date.now(); ms[name] = (ms[name] || 0) + (n - last); last = n; },
     all: () => Object.assign({}, ms, { total: Date.now() - t0 }),
   };
+}
+
+// --- Flow 2: slip capture, storage and extraction (no Xero bill yet) -------------------------
+
+const SLIP_RULES = Object.freeze({
+  MAX_BYTES: 6 * 1024 * 1024,      // the browser sends ~0.2–0.8 MB after downscaling; this is a hard cap
+  MIN_BYTES: 2000,
+  RATE_MAX: 40,                    // uploads per user per hour
+  RATE_WINDOW_S: 3600,
+  MAX_LINES: 50,
+});
+
+/** The PO's own buyer (or an admin of that company) may add its slip. Anyone else gets NOT_FOUND. */
+function requireSlipPO_(ctx, poId) {
+  const id = str_(poId, 60);
+  const po = id ? findBy('POs', 'po_id', id)[0] : null;
+  const g = po ? ctx.grants[po.entity_id] : null;
+  const mine = po && String(po.buyer_user_id) === String(ctx.user.user_id);
+  if (!po || !g || !((mine && g.canBuy) || ctx.user.role === 'admin')) throw new AppError('NOT_FOUND', 'PO not found.');
+  return po;
+}
+
+function requireSlipBill_(ctx, billId) {
+  const id = str_(billId, 60);
+  const bill = id ? findBy('Bills', 'bill_id', id)[0] : null;
+  if (!bill) throw new AppError('NOT_FOUND', 'Slip not found.');
+  const po = requireSlipPO_(ctx, bill.po_id);
+  if (bill.xero_invoice_id) throw new AppError('BAD_REQUEST', 'This slip is already on a Xero bill.');
+  return { bill: bill, po: po };
+}
+
+function slipStatusMessage_(po) {
+  return {
+    AWAITING_APPROVAL: 'This PO is still waiting for approval. Add the slip once it is approved.',
+    PENDING_XERO: 'This PO doesn’t have its Xero number yet. Add the slip once it has.',
+    DECLINED: 'This PO was declined.',
+    CANCELLED: 'This PO was cancelled.',
+    BILLED: 'This PO already has its bill.',
+  }[po.status] || 'A slip can’t be added to this PO.';
+}
+
+function actionUploadSlip_(req, ctx) {
+  const T = stepTimer_(ctx);
+  const p = req.payload;
+  const po = requireSlipPO_(ctx, p.poId);
+  if (po.status !== PO_STATUS.ISSUED) throw new AppError('BAD_REQUEST', slipStatusMessage_(po));
+  if (p.mimeType !== 'image/jpeg') throw new AppError('BAD_REQUEST', 'Send the photo as a JPEG.');
+  const b64 = String(p.imageBase64 || '');
+  if (b64.length > Math.ceil(SLIP_RULES.MAX_BYTES * 4 / 3) + 4) throw new AppError('TOO_LARGE', 'That photo is too large. Please take it again.');
+  let bytes;
+  try { bytes = Utilities.base64Decode(b64); } catch (err) { throw new AppError('BAD_REQUEST', 'The photo could not be read. Please take it again.'); }
+  // Check the content, not just the declared type: a JPEG starts FF D8 FF.
+  if (bytes.length < SLIP_RULES.MIN_BYTES || (bytes[0] & 0xff) !== 0xff || (bytes[1] & 0xff) !== 0xd8 || (bytes[2] & 0xff) !== 0xff) {
+    throw new AppError('BAD_REQUEST', 'That file isn’t a JPEG photo.');
+  }
+  rateLimit_('slip', ctx.user.user_id, SLIP_RULES.RATE_MAX, SLIP_RULES.RATE_WINDOW_S);
+  T.mark('prep');
+
+  const now = new Date();
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(PO_RULES.LOCK_WAIT_MS)) throw new AppError('BUSY', 'PO Desk is busy. Please try again.');
+  let folder;
+  try { folder = slipFolder_(po.entity_id, now); } finally { lock.releaseLock(); }   // folder creation must not race
+  const file = folder.createFile(Utilities.newBlob(bytes, 'image/jpeg', slipFileName_(po, Utilities.formatDate(now, APP.TZ, 'yyyy-MM-dd'), null)));
+  T.mark('drive');
+
+  let bill;
+  let replaced = '';
+  if (!lock.tryLock(PO_RULES.LOCK_WAIT_MS)) { trashSlip_(file.getId()); throw new AppError('BUSY', 'PO Desk is busy. Please try again.'); }
+  try {
+    invalidateTable_('Bills');
+    // One draft per PO: a retake replaces the photo and clears anything read from the old one.
+    const draft = readTable('Bills').rows.find(b => b.po_id === po.po_id && !b.xero_invoice_id);
+    if (draft) {
+      replaced = String(draft.drive_file_id || '');
+      updateRowById('Bills', 'bill_id', draft.bill_id, { drive_file_id: file.getId(), slip_number: '', slip_date: '', supplier_vat_no: '', total_incl_zar: '', vat_zar: '', ocr_json: '', flags: '' });
+      bill = draft;
+    } else {
+      bill = {
+        bill_id: Utilities.getUuid(), po_id: po.po_id, entity_id: po.entity_id, xero_invoice_id: '', slip_number: '', slip_date: '',
+        supplier_vat_no: '', total_incl_zar: '', vat_zar: '', drive_file_id: file.getId(), ocr_json: '', flags: '',
+        created_by: ctx.user.user_id, created_at: now,
+      };
+      appendRow('Bills', bill);
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  if (replaced && replaced !== file.getId()) trashSlip_(replaced);
+  T.mark('write');
+  auditLog({ userId: ctx.user.user_id, entityId: po.entity_id, action: 'slip.upload', ref: bill.bill_id, ok: true, detail: { po: po.po_number, bytes: bytes.length, retake: !!replaced, ms: T.all() } });
+  return { billId: bill.bill_id, poId: po.po_id, bytes: bytes.length };
+}
+
+function actionReadSlip_(req, ctx) {
+  const { bill, po } = requireSlipBill_(ctx, req.payload.billId);
+  const ocr = extractSlip(bill.drive_file_id, { userId: ctx.user.user_id, entityId: po.entity_id, ref: bill.bill_id });
+  const stored = {
+    status: ocr.status, reason: ocr.reason, model: ocr.model, ms: ocr.ms, at: new Date().toISOString(),
+    extracted: ocr.fields || null, confidence: ocr.confidence || {}, lowConfidence: ocr.lowConfidence || [], checks: ocr.checks || [],
+  };
+  updateRowById('Bills', 'bill_id', bill.bill_id, { ocr_json: JSON.stringify(stored) });
+  return slipView_(bill, po, stored, null);
+}
+
+function actionGetSlip_(req, ctx) {
+  const { bill, po } = requireSlipBill_(ctx, req.payload.billId);
+  const stored = parseJson_(bill.ocr_json) || {};
+  const view = slipView_(bill, po, stored, stored.reviewed || null);
+  if (req.payload.withImage === true) view.image = slipImageBase64_(bill.drive_file_id);
+  return view;
+}
+
+function actionSaveSlipReview_(req, ctx) {
+  const { bill, po } = requireSlipBill_(ctx, req.payload.billId);
+  const f = validateSlipFields_(req.payload.fields);
+  const flags = slipFlags_(po, f, bill.bill_id);
+  const stored = parseJson_(bill.ocr_json) || {};
+  const ex = stored.extracted || {};
+  const edited = stored.status === 'ok'
+    ? ['supplierName', 'supplierVatNumber', 'slipNumber', 'date', 'totalIncl', 'vatAmount'].filter(k => String(ex[k] === null || ex[k] === undefined ? '' : ex[k]) !== String(f[k] === null ? '' : f[k]))
+    : [];
+  Object.assign(stored, { reviewed: f, reviewedAt: new Date().toISOString(), reviewedBy: ctx.user.user_id, source: stored.status === 'ok' ? 'gemini' : 'manual', edited: edited });
+  updateRowById('Bills', 'bill_id', bill.bill_id, {
+    slip_number: f.slipNumber, slip_date: new Date(f.date + 'T12:00:00+02:00'), supplier_vat_no: f.supplierVatNumber,
+    total_incl_zar: f.totalIncl, vat_zar: f.vatAmount === null ? '' : f.vatAmount,
+    ocr_json: JSON.stringify(stored), flags: JSON.stringify(flags.map(x => x.code)),
+  });
+  const fileName = slipFileName_(po, f.date, f.totalIncl);
+  try { renameSlip_(bill.drive_file_id, fileName); } catch (err) { console.warn('Rename failed: ' + err.message); }
+  auditLog({ userId: ctx.user.user_id, entityId: po.entity_id, action: 'slip.review', ref: bill.bill_id, ok: true, detail: { po: po.po_number, source: stored.source, edited: edited, flags: flags.map(x => x.code) } });
+  return { saved: true, billId: bill.bill_id, poId: po.po_id, flags: flags, fileName: fileName };
+}
+
+/** What the review screen needs: values (reviewed, else extracted, else a manual prefill), flags, thresholds. */
+function slipView_(bill, po, stored, reviewed) {
+  const manual = !reviewed && stored.status !== 'ok';
+  let fields = reviewed || stored.extracted;
+  if (!fields || manual) {
+    // Typing by hand: start from what PO Desk already knows about this supplier.
+    const known = getRefData(po.entity_id).suppliers.find(s => s.contact_id === po.contact_id);
+    fields = { supplierName: String(po.supplier_name), supplierVatNumber: known && /^4\d{9}$/.test(String(known.vat_number)) ? String(known.vat_number) : '',
+      slipNumber: '', date: '', currency: 'ZAR', lineItems: [], subtotalExcl: null, vatAmount: null, totalIncl: null, paymentMethodHint: '' };
+  }
+  return {
+    billId: bill.bill_id,
+    po: { poId: po.po_id, poNumber: String(po.po_number), supplierName: String(po.supplier_name), amountInclZar: Number(po.amount_incl_zar), createdAt: po.created_at instanceof Date ? po.created_at.toISOString() : String(po.created_at), entityId: po.entity_id },
+    status: reviewed ? 'reviewed' : (stored.status || 'manual'),
+    reason: stored.reason || (stored.status ? '' : 'The slip hasn’t been read yet.'),
+    fields: fields,
+    confidence: reviewed ? {} : (stored.confidence || {}),
+    lowConfidence: reviewed || manual ? [] : (stored.lowConfidence || []),
+    checks: reviewed || manual ? [] : (stored.checks || []),
+    flags: fields.totalIncl ? slipFlags_(po, fields, bill.bill_id) : [],
+    thresholds: slipThresholds_(),
+  };
+}
+
+function slipThresholds_() {
+  return {
+    variancePct: Number(getConfig('VARIANCE_PCT', 10)),
+    varianceZar: Number(getConfig('VARIANCE_ZAR', 500)),
+    fullInvoiceZar: Number(getConfig('VAT_FULL_INVOICE_ZAR', 5000)),
+    dateDays: Number(getConfig('SLIP_DATE_TOLERANCE_DAYS', 3)),
+  };
+}
+
+/** Server-side validation of the buyer's reviewed values. Throws BAD_REQUEST with a plain message. */
+function validateSlipFields_(f) {
+  if (!f || typeof f !== 'object' || Array.isArray(f)) throw new AppError('BAD_REQUEST', 'Missing slip details.');
+  const bad = (m) => { throw new AppError('BAD_REQUEST', m); };
+  const text = (v, max) => String(v === null || v === undefined ? '' : v).replace(/\s+/g, ' ').trim().slice(0, max);
+  const money = (v) => { if (v === null || v === undefined || v === '') return null; const n = parseAmount_(v); return isNaN(n) ? NaN : n; };
+  const out = {};
+  out.supplierName = text(f.supplierName, 100);
+  if (!out.supplierName) bad('Enter the supplier’s name as printed on the slip.');
+  out.supplierVatNumber = text(f.supplierVatNumber, 20).replace(/\D/g, '');
+  if (out.supplierVatNumber && !/^4\d{9}$/.test(out.supplierVatNumber)) bad('A South African VAT number is 10 digits starting with 4. Leave it empty if the slip has none.');
+  out.slipNumber = text(f.slipNumber, 40);
+  out.date = text(f.date, 10);
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(out.date) ? new Date(out.date + 'T12:00:00Z') : null;
+  if (!d || isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== out.date) bad('Enter the date on the slip.');
+  if (d.getUTCFullYear() < 2020 || d.getTime() > Date.now() + 36 * 3600 * 1000) bad('The slip date can’t be in the future or before 2020.');
+  out.totalIncl = money(f.totalIncl);
+  if (!(out.totalIncl > 0) || out.totalIncl > PO_RULES.MAX_AMOUNT_ZAR) bad('Enter the slip total including VAT, e.g. 245.90.');
+  out.vatAmount = money(f.vatAmount);
+  if (out.vatAmount !== null && (isNaN(out.vatAmount) || out.vatAmount < 0 || out.vatAmount > out.totalIncl)) bad('The VAT amount must be between 0 and the total.');
+  out.currency = 'ZAR';
+  out.subtotalExcl = null;
+  out.paymentMethodHint = text(f.paymentMethodHint, 10).toUpperCase();
+  const lines = Array.isArray(f.lineItems) ? f.lineItems : [];
+  if (lines.length > SLIP_RULES.MAX_LINES) bad('A slip can have at most ' + SLIP_RULES.MAX_LINES + ' lines; put the rest into one line.');
+  out.lineItems = lines.map((li, i) => {
+    const description = text(li && li.description, 200);
+    const qty = money(li && li.qty);
+    const total = money(li && li.lineTotalIncl);
+    if (!description) bad('Line ' + (i + 1) + ' needs a description.');
+    if (qty !== null && (isNaN(qty) || qty <= 0 || qty > 100000)) bad('Line ' + (i + 1) + ' has an invalid quantity.');
+    if (total === null || isNaN(total)) bad('Line ' + (i + 1) + ' needs an amount.');
+    const unit = money(li && li.unitPriceIncl);
+    return { description: description, qty: qty === null ? 1 : qty, unitPriceIncl: unit === null || isNaN(unit) ? null : unit, lineTotalIncl: total };
+  });
+  return out;
+}
+
+/**
+ * CLAUDE.md Flow 2 step 5: warn, never block. Returns [{ code, message }] for amber notes.
+ * The browser shows the same rules live; this is the authoritative copy stored on the Bills row.
+ */
+function slipFlags_(po, f, billId) {
+  const cfg = slipThresholds_();
+  const flags = [];
+  const poAmount = Number(po.amount_incl_zar);
+  const total = Number(f.totalIncl);
+  if (total > 0 && poAmount > 0) {
+    const diff = Math.round((total - poAmount) * 100) / 100;
+    const pct = Math.abs(diff) / poAmount * 100;
+    if (Math.abs(diff) > cfg.varianceZar || pct > cfg.variancePct) {
+      flags.push({ code: 'VARIANCE', message: 'The slip total ' + randText_(total) + ' is ' + randText_(Math.abs(diff)) + (diff > 0 ? ' more' : ' less') + ' than the PO amount ' + randText_(poAmount) + ' (' + Math.round(pct) + '%).' });
+    }
+  }
+  if (f.supplierName && !namesMatch_(f.supplierName, po.supplier_name)) {
+    flags.push({ code: 'SUPPLIER_MISMATCH', message: 'The slip is from “' + f.supplierName + '”, but the PO is for “' + po.supplier_name + '”.' });
+  }
+  if (!f.supplierVatNumber) flags.push({ code: 'NO_VAT_NUMBER', message: 'No supplier VAT number: the bill will use No VAT, so no VAT can be claimed back on it.' });
+  if (total > cfg.fullInvoiceZar) {
+    flags.push({ code: 'FULL_TAX_INVOICE', message: 'Over ' + randText_(cfg.fullInvoiceZar) + ': SARS needs a full tax invoice showing ' + entityById_(po.entity_id).legal_name + '’s name, address and VAT number, not only a till slip.' });
+  }
+  if (f.date) {
+    const poDay = Utilities.formatDate(po.created_at instanceof Date ? po.created_at : new Date(po.created_at), APP.TZ, 'yyyy-MM-dd');
+    const days = Math.round(Math.abs(new Date(f.date + 'T00:00:00Z') - new Date(poDay + 'T00:00:00Z')) / 86400000);
+    if (days > cfg.dateDays) flags.push({ code: 'DATE_GAP', message: 'The slip is dated ' + f.date + ', ' + days + ' days from the PO (' + poDay + ').' });
+  }
+  const dup = duplicateSlip_(po, f, billId);
+  if (dup) flags.push({ code: 'DUPLICATE', message: 'This looks like a slip already captured on ' + (dup.po_number || 'another PO') + ' (same supplier and ' + dup.why + ').' });
+  return flags;
+}
+
+/** Same supplier and slip number, or same supplier, date and total, on another Bills row. */
+function duplicateSlip_(po, f, billId) {
+  const posById = {};
+  readTable('POs').rows.forEach(r => { posById[r.po_id] = r; });
+  const slipNo = String(f.slipNumber || '').replace(/\s+/g, '').toLowerCase();
+  for (const b of readTable('Bills').rows) {
+    if (b.bill_id === billId || b.entity_id !== po.entity_id) continue;
+    const other = posById[b.po_id];
+    if (!other || other.contact_id !== po.contact_id || other.status === PO_STATUS.CANCELLED) continue;
+    if (slipNo && String(b.slip_number || '').replace(/\s+/g, '').toLowerCase() === slipNo) return { po_number: other.po_number, why: 'slip number' };
+    const bDay = b.slip_date instanceof Date ? Utilities.formatDate(b.slip_date, APP.TZ, 'yyyy-MM-dd') : String(b.slip_date || '').slice(0, 10);
+    if (f.date && bDay === f.date && Math.abs(Number(b.total_incl_zar) - Number(f.totalIncl)) < 0.005) return { po_number: other.po_number, why: 'date and total' };
+  }
+  return null;
+}
+
+// Words that say nothing about which supplier it is, so they never count as a match on their own.
+const GENERIC_NAME_WORDS = Object.freeze(['pty', 'ltd', 'cc', 'inc', 'the', 'and', 'limited', 'company', 'trading', 'group', 'store', 'stores', 'shop',
+  'motors', 'services', 'supplies', 'supply', 'market', 'supermarket', 'hardware', 'pharmacy', 'garage', 'station', 'centre', 'center', 'sa', 'south', 'africa']);
+
+/** Loose supplier-name match: "SPAR KLEIN KAROO" matches "Spar Oudtshoorn"; "Engen" does not match "Shell". */
+function namesMatch_(a, b) {
+  const norm = (s) => String(s || '').toLowerCase().replace(/\(pty\)/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
+  const na = norm(a);
+  const nb = norm(b);
+  if (!na || !nb) return false;
+  if (na === nb || na.indexOf(nb) !== -1 || nb.indexOf(na) !== -1) return true;
+  const words = (s) => s.split(' ').filter(w => w.length >= 3 && GENERIC_NAME_WORDS.indexOf(w) === -1);
+  const wb = words(nb);
+  return words(na).some(w => wb.indexOf(w) !== -1);
+}
+
+function parseJson_(s) {
+  if (!s) return null;
+  try { return JSON.parse(s); } catch (err) { return null; }
 }

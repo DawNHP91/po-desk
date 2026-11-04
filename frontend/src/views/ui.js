@@ -94,3 +94,15 @@ export function fill(root, ...kids) {
   append(root, kids);
   return root;
 }
+
+/** Data passed from one screen to the next without another server call (e.g. the photo just taken). */
+export const handover = new Map();
+
+/** Accepts 1234.5, 1 234,50, 1,234.50 and R-prefixed amounts; returns a cents-rounded number or NaN. */
+export function parseAmount(v) {
+  let s = String(v === null || v === undefined ? '' : v).replace(/[R\s]/gi, '');
+  if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) s = s.replace(/,/g, '');
+  else s = s.replace(',', '.');
+  if (!/^-?\d+(\.\d{1,2})?$/.test(s)) return NaN;
+  return Math.round(Number(s) * 100) / 100;
+}
