@@ -1006,7 +1006,12 @@ const SLIP_TEST_TAB = 'SlipTest';
 const SLIP_TEST_COLS = ['file', 'sent', 'model', 'ms', 'status', 'reason', 'supplier', 'date', 'total', 'vat', 'vat_number', 'slip_number', 'lines', 'low_confidence', 'checks',
   'true_supplier', 'true_date', 'true_total', 'true_vat', 'true_vat_number', 'true_slip_number'];
 
-function runSlipTest() {
+function runSlipTest() { runSlipTest_(false); }
+
+/** Re-reads only the slips that came back "manual" (and any new photos); every other row stays exactly as it is. */
+function rerunFailedSlips() { runSlipTest_(true); }
+
+function runSlipTest_(onlyFailed) {
   const root = DriveApp.getFolderById(getSecret_('DRIVE_ROOT_ID'));
   const it = root.getFoldersByName('_test');
   if (!it.hasNext()) throw new AppError('SETUP_ORDER', 'Create a folder "_test" inside PO Desk and put the slip photos in it.');
@@ -1025,25 +1030,34 @@ function runSlipTest() {
     vals.slice(1).forEach(r => { const o = {}; h.forEach((k, i) => { o[k] = r[i]; }); prev[o.file] = o; });
   }
   const rows = [];
+  let reads = 0;
   files.forEach((file, i) => {
-    if (i > 0) Utilities.sleep(6500);   // stay well under free-tier requests-per-minute limits
+    const keep = prev[file.getName()] || {};
+    if (onlyFailed && keep.status && keep.status !== 'manual') {
+      rows.push(SLIP_TEST_COLS.map(c => (keep[c] === undefined || keep[c] === null ? '' : keep[c])));
+      return;
+    }
+    if (reads++ > 0) Utilities.sleep(6500);   // stay well under free-tier requests-per-minute limits
     const sized = slipTestImage_(file);
     const r = extractSlipFromBlob_(sized.blob, { ref: 'slip-test:' + file.getName() });
     const f = r.fields || {};
-    const keep = prev[file.getName()] || {};
-    rows.push([file.getName(), sized.note, r.model, r.ms, r.status, r.reason || '', f.supplierName || '', f.date || '', f.totalIncl === null || f.totalIncl === undefined ? '' : f.totalIncl,
+    // "ok" meant "the old read was right". The new read may differ, so keep the old value itself as the truth.
+    const truth = (k) => { const t = String(keep['true_' + k] || '').trim(); return /^ok$/i.test(t) ? (String(keep[k] || '').trim() || 'none') : t; };
+    const reason = (r.reason || '') + (r.http ? ' [HTTP ' + r.http + (r.error ? ' ' + r.error : '') + ']' : '');
+    rows.push([file.getName(), sized.note, r.model, r.ms, r.status, reason, f.supplierName || '', f.date || '', f.totalIncl === null || f.totalIncl === undefined ? '' : f.totalIncl,
       f.vatAmount === null || f.vatAmount === undefined ? '' : f.vatAmount, f.supplierVatNumber || '', f.slipNumber || '', (f.lineItems || []).length,
       (r.lowConfidence || []).join(', '), (r.checks || []).map(c => c.code).join(', '),
-      keep.true_supplier || '', keep.true_date || '', keep.true_total || '', keep.true_vat || '', keep.true_vat_number || '', keep.true_slip_number || '']);
-    console.log((i + 1) + '/' + files.length + ' ' + file.getName() + ': ' + r.status + ' ' + (f.supplierName || '-') + ' | ' + (f.date || '-') + ' | ' + (f.totalIncl == null ? '-' : f.totalIncl) + ' (' + r.ms + ' ms, ' + sized.note + ')');
+      truth('supplier'), truth('date'), truth('total'), truth('vat'), truth('vat_number'), truth('slip_number')]);
+    console.log((i + 1) + '/' + files.length + ' ' + file.getName() + ': ' + r.status + ' ' + (f.supplierName || '-') + ' | ' + (f.date || '-') + ' | ' + (f.totalIncl == null ? '-' : f.totalIncl) + ' (' + r.ms + ' ms, ' + sized.note + ')' + (r.status === 'manual' ? ' — ' + reason : ''));
   });
+  if (onlyFailed && !reads) { out_('rerunFailedSlips: nothing to re-read', 'No slip in the "' + SLIP_TEST_TAB + '" tab has status "manual".'); return; }
   sh.clear();
   sh.getRange(1, 1, 1, SLIP_TEST_COLS.length).setValues([SLIP_TEST_COLS]).setFontWeight('bold');
   // Text format, so typed truths like 03/11/2026 or 0123 are never reinterpreted.
   sh.getRange(1, 1, Math.max(rows.length + 1, 50), SLIP_TEST_COLS.length).setNumberFormat('@');
   sh.getRange(2, 1, rows.length, SLIP_TEST_COLS.length).setValues(rows.map(r => r.map(v => typeof v === 'number' ? String(v) : v)));
   sh.setFrozenRows(1);
-  out_('runSlipTest: ' + rows.length + ' slip(s) read', 'Results are in the "' + SLIP_TEST_TAB + '" tab. Fill the true_* columns ("ok" if the read value is right, "none" if it is not on the slip), then run scoreSlipTest().');
+  out_((onlyFailed ? 'rerunFailedSlips: ' + reads + ' slip(s) re-read' : 'runSlipTest: ' + rows.length + ' slip(s) read'),'Results are in the "' + SLIP_TEST_TAB + '" tab. Fill the true_* columns ("ok" if the read value is right, "none" if it is not on the slip), then run scoreSlipTest().');
 }
 
 /** A 1600 px rendition from Drive, like the app's downscale; falls back to the original if Drive has none. */

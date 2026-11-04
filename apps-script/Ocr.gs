@@ -93,6 +93,15 @@ function extractSlip(fileId, ctx) {
   return extractSlipFromBlob_(DriveApp.getFileById(fileId).getBlob(), ctx);
 }
 
+/** Gemini's own error message ({error:{status, message}}), short enough for a log or a sheet cell. Never shown to buyers. */
+function geminiError_(text) {
+  try {
+    const e = JSON.parse(text).error || {};
+    if (e.message) return truncate_((e.status ? e.status + ': ' : '') + e.message, 200);
+  } catch (err) { /* not JSON */ }
+  return truncate_(text, 200);
+}
+
 /** Core of extractSlip: takes the image itself (the slip test sends 1600 px renditions, like the app). */
 function extractSlipFromBlob_(blob, ctx) {
   ctx = ctx || {};
@@ -100,7 +109,7 @@ function extractSlipFromBlob_(blob, ctx) {
   const model = String(getConfig('GEMINI_MODEL', 'gemini-3.6-flash'));
   const manual = (reason, extra) => {
     const out = Object.assign({ status: 'manual', reason: reason, model: model, ms: Date.now() - t0 }, extra || {});
-    auditLog({ userId: ctx.userId, entityId: ctx.entityId, action: 'ocr.extract', ref: ctx.ref, ok: false, detail: { model: model, ms: out.ms, reason: reason, http: out.http, attempts: out.attempts } });
+    auditLog({ userId: ctx.userId, entityId: ctx.entityId, action: 'ocr.extract', ref: ctx.ref, ok: false, detail: { model: model, ms: out.ms, reason: reason, http: out.http, attempts: out.attempts, error: out.error } });
     return out;
   };
 
@@ -143,7 +152,7 @@ function extractSlipFromBlob_(blob, ctx) {
     if (code === 404) return manual('Slip reading is misconfigured (model "' + model + '" not found). Tell your PO Desk admin.', { http: 404, attempts: attempt });
     if (code >= 500 && attempt < OCR.MAX_ATTEMPTS) { Utilities.sleep(1500); continue; }
     console.warn('Gemini ' + code + ': ' + truncate_(text, 300));
-    return manual('Slip reading is unavailable right now.', { http: code, attempts: attempt });
+    return manual('Slip reading is unavailable right now.', { http: code, attempts: attempt, error: geminiError_(text) });
   }
 
   let raw;
