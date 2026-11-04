@@ -248,7 +248,9 @@ function planChoiceWrites_(ent, contactId, accountCode, freshRows, n) {
 
 const WORD_STOP = Object.freeze(['the', 'and', 'for', 'with', 'from', 'per', 'inv', 'invoice', 'ref', 'reference', 'qty', 'each',
   'incl', 'excl', 'vat', 'total', 'subtotal', 'amount', 'pty', 'ltd', 'item', 'items', 'without', 'zero', 'rated', 'exempt',
-  'payment', 'paid', 'order', 'purchase', 'po', 'desk', 'account', 'monthly', 'month', 'date', 'no', 'nr', 'number']);
+  'payment', 'paid', 'order', 'purchase', 'po', 'desk', 'account', 'monthly', 'month', 'date', 'no', 'nr', 'number',
+  // Filler that says nothing about what was bought (HPB backtest: "used" pointed 100% to one account).
+  'used', 'single', 'expense', 'cost', 'general', 'various', 'sundry', 'misc', 'miscellaneous', 'other', 'new']);
 
 /** Distinct meaningful words of a description: lower case, 3+ letters, no numbers or stop words, light plural folding. */
 function wordsOf_(text) {
