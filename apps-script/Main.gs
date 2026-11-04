@@ -552,7 +552,8 @@ function actionReadSlip_(req, ctx) {
     status: ocr.status, reason: ocr.reason, model: ocr.model, ms: ocr.ms, at: new Date().toISOString(),
     extracted: ocr.fields || null, confidence: ocr.confidence || {}, lowConfidence: ocr.lowConfidence || [], checks: ocr.checks || [],
   };
-  updateRowById('Bills', 'bill_id', bill.bill_id, { ocr_json: JSON.stringify(stored) });
+  // Reading again means starting over from the photo, like a retake: earlier reviewed values go.
+  updateRowById('Bills', 'bill_id', bill.bill_id, { ocr_json: JSON.stringify(stored), slip_number: '', slip_date: '', supplier_vat_no: '', total_incl_zar: '', vat_zar: '', flags: '' });
   return slipView_(bill, po, stored, null);
 }
 
