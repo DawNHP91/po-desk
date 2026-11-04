@@ -140,15 +140,19 @@ function fetchEntity_(entityId, deadline) {
   const historyRows = buildSupplierHistory_(events, Number(getConfig('SUPPLIER_HISTORY_N', 5)))
     .map(h => Object.assign({ entity_id: e.entity_id }, h));
 
+  // Learned words: every coded bill line, plus what buyers typed on POs not billed yet.
+  const wordIndex = buildWordIndex_(billWordLines_(bills).concat(openPoWordLines_(e.entity_id)), 2);
+
   const supplierIds = {};
   supplierRows.forEach(r => { supplierIds[r.contact_id] = true; });
   return {
-    accountRows: accountRows, taxRows: taxRows, supplierRows: supplierRows, historyRows: historyRows,
+    accountRows: accountRows, taxRows: taxRows, supplierRows: supplierRows, historyRows: historyRows, wordIndex: wordIndex,
     stats: {
       fetchMs: Date.now() - t0, composioCalls: composioStats_.calls - callsBefore,
       accounts: accountRows.length, taxRates: taxRows.length, contactsFetched: contacts.length, suppliers: supplierRows.length,
       billsScanned: bills.length, billsWithoutCodes: bills.filter(b => !(b.LineItems || []).some(l => l.AccountCode)).length,
       historyRows: historyRows.length,
+      wordLines: wordIndex.lines, wordsLearned: Object.keys(wordIndex.w).length,
       suppliersWithHistory: Object.keys(historyRows.reduce((m, r) => { m[r.contact_id] = 1; return m; }, {})).length,
       // Bills come from a tenant-safe tool; if their suppliers are mostly missing from the contact
       // list, the contacts probably came from the wrong org.
@@ -165,6 +169,8 @@ function writeEntity_(ent, f) {
     replaceEntityRows_('TaxRates', ent, f.taxRows);
     replaceEntityRows_('Suppliers', ent, f.supplierRows);
     replaceEntityRows_('SupplierHistory', ent, f.historyRows);
+    // A missing WordIndex tab (setupSheets not run since Stage 8) must not fail the rest of the sync.
+    try { storeWordIndex_(ent, f.wordIndex, new Date()); } catch (err) { f.stats.wordsError = err.message; console.warn('WordIndex not written: ' + err.message); }
   } finally {
     lock.releaseLock();
   }
@@ -209,6 +215,23 @@ function billEvents_(bills) {
     if (contactId && codes.length && date) out.push({ contactId: contactId, date: date, codes: codes });
   });
   return out;
+}
+
+function billWordLines_(bills) {
+  const out = [];
+  bills.forEach(b => (b.LineItems || []).forEach(l => {
+    if (l.AccountCode && l.Description) out.push({ desc: String(l.Description), code: String(l.AccountCode).trim() });
+  }));
+  return out;
+}
+
+/** What buyers typed on POs not billed yet (billed ones are already in the bill lines). */
+function openPoWordLines_(entityId) {
+  let rows = [];
+  try { rows = readTable('POs').rows; } catch (err) { return []; }
+  return rows
+    .filter(r => r.entity_id === entityId && r.account_code && r.description && ['ISSUED', 'AWAITING_APPROVAL', 'PENDING_XERO'].indexOf(r.status) !== -1)
+    .map(r => ({ desc: String(r.description), code: String(r.account_code) }));
 }
 
 /**

@@ -1,7 +1,8 @@
 /**
  * Coding.gs — suggests the chart-of-accounts code for a purchase, and learns from the buyer's choice.
  *
- * Order (CLAUDE.md): 1 supplier history → 2 keyword rules → 3 category default → 4 fallback.
+ * Order (CLAUDE.md): 1 supplier history → 2 keyword rules → 3 learned words (past bills with the
+ * same words) → 4 category default → 5 fallback.
  * Every candidate must be an ACTIVE purchase account in THIS company's synced chart; anything else
  * (archived, another company's code, a balance-sheet account) is skipped, never returned.
  */
@@ -82,11 +83,13 @@ function codingData_(ent) {
     suppliers: ref.suppliers,
     categories: readTable('Categories').rows.filter(r => r.entity_id === ent),
     history: readTable('SupplierHistory').rows.filter(r => r.entity_id === ent),
+    words: wordIndexFor_(ent),
     config: {
       historyN: Number(getConfig('SUPPLIER_HISTORY_N', 5)),
       defaultAccount: String(getConfig('DEFAULT_ACCOUNT_' + ent, '') || ''),
       extraAccounts: String(getConfig('EXTRA_PURCHASE_ACCOUNTS_' + ent, '') || ''),
       purchaseTaxType: String(getConfig('PURCHASE_TAX_TYPE', 'INPUT3')),
+      wordMinShare: Number(getConfig('WORD_MIN_SHARE', 0.6)) || 0.6,
     },
   };
 }
@@ -138,7 +141,15 @@ function suggestAccountWith_(data, ent, contactId, categoryId, description) {
     }
   }
 
-  // 3. Category default. A category ID from another company is not in `categories` and is ignored.
+  // 3. Learned words: what past bills with the same words in their description were coded to.
+  if (desc && data.words) {
+    const w = wordSuggest_(data.words, desc, allowed, { minShare: data.config.wordMinShare });
+    if (w) {
+      return result(w.code, 'words', w.count + ' earlier bill line' + (w.count === 1 ? '' : 's') + ' with “' + w.word + '” went to ' + w.code + ' ' + allowed[w.code].name + '.', '', false);
+    }
+  }
+
+  // 4. Category default. A category ID from another company is not in `categories` and is ignored.
   if (categoryId) {
     const cat = categories.find(c => String(c.category_id) === String(categoryId));
     if (cat) {
@@ -150,7 +161,7 @@ function suggestAccountWith_(data, ent, contactId, categoryId, description) {
     }
   }
 
-  // 4. Fallback.
+  // 5. Fallback.
   const fallback = data.config.defaultAccount;
   if (fallback && allowed[fallback]) {
     return result(fallback, 'fallback', 'No supplier history or matching category: default account, needs review.', '', true);
@@ -245,9 +256,20 @@ function wordsOf_(text) {
   String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').forEach(w => {
     if (w.length < 3 || /^\d+$/.test(w) || /\d/.test(w) && w.length < 5) return;
     const s = stemWord_(w);
-    if (WORD_STOP.indexOf(s) === -1 && WORD_STOP.indexOf(w) === -1 && out.indexOf(s) === -1) out.push(s);
+    if (WORD_STOP.indexOf(s) === -1 && WORD_STOP.indexOf(w) === -1 && companyWords_().indexOf(s) === -1 && out.indexOf(s) === -1) out.push(s);
   });
   return out;
+}
+
+/** The three companies' own names say nothing about what was bought ("NHP Global" on half the bills). */
+function companyWords_() {
+  if (!companyWords_.cache) {
+    const out = [];
+    ENTITY_SEED.forEach(e => [e.entity_id, e.short_name, e.legal_name].join(' ').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ')
+      .forEach(w => { if (w.length >= 3) out.push(w, stemWord_(w)); }));
+    companyWords_.cache = out;
+  }
+  return companyWords_.cache;
 }
 
 function stemWord_(w) {
@@ -309,4 +331,52 @@ function wordSuggest_(index, description, allowed, opts) {
   const share = scores[best] / total;
   if (why[best].count < minLines || share < minShare) return null;
   return { code: best, word: why[best].word, count: why[best].count, share: Math.round(share * 100) / 100 };
+}
+
+// --- Learned words: storage ---------------------------------------------------------------------
+// Built by the nightly sync (Sync.gs) into the WordIndex tab and the script cache. Read here on
+// every suggestion: from the cache, else from the tab (then cached), else none (no tab yet).
+
+const WORD_CACHE_S = 21600;
+
+function wordIndexFor_(ent) {
+  const props = PropertiesService.getScriptProperties();
+  const version = props.getProperty('WORDVER_' + ent) || '0';
+  const key = 'words:' + ent + ':' + version;
+  const hit = cacheGetJson_(key);
+  if (hit) return hit.lines ? hit : null;
+  let index = { lines: 0, w: {} };
+  try {
+    index = wordIndexFromRows_(readTable('WordIndex').rows.filter(r => r.entity_id === ent));
+  } catch (err) {
+    console.warn('WordIndex not readable (' + err.message + '); learned words are off until setupSheets and a sync.');
+  }
+  cachePutJson_(key, index);
+  return index.lines ? index : null;
+}
+
+/** Saves a freshly built index: Sheet rows for durability, a new cache version for speed. */
+function storeWordIndex_(ent, index, now) {
+  replaceEntityRows_('WordIndex', ent, wordIndexRows_(ent, index, now));
+  const version = String(Date.now());
+  cachePutJson_('words:' + ent + ':' + version, index);
+  PropertiesService.getScriptProperties().setProperty('WORDVER_' + ent, version);
+}
+
+function wordIndexRows_(ent, index, now) {
+  const rows = [{ entity_id: ent, word: '#lines', account_code: '', lines: index.lines, synced_at: now }];
+  Object.keys(index.w).sort().forEach(x => Object.keys(index.w[x][1]).forEach(code =>
+    rows.push({ entity_id: ent, word: x, account_code: code, lines: index.w[x][1][code], synced_at: now })));
+  return rows;
+}
+
+function wordIndexFromRows_(rows) {
+  const index = { lines: 0, w: {} };
+  rows.forEach(r => {
+    if (r.word === '#lines') { index.lines = Number(r.lines) || 0; return; }
+    const e = index.w[r.word] || (index.w[r.word] = [0, {}]);
+    e[1][String(r.account_code)] = Number(r.lines) || 0;
+    e[0] += Number(r.lines) || 0;
+  });
+  return index;
 }

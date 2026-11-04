@@ -66,7 +66,7 @@ screen and sets their own PIN from the emailed link. Every setup function is saf
 `setupSheets` again after any update that adds columns.
 
 Scheduled jobs (`installTriggers`, one trigger each, safe to run again): `nightlySync` 02:00 SAST (Xero
-reference data), `processQueue` every 5 minutes (provisional POs, unfinished bills, approval reminders),
+reference data, supplier history and the learned-word index for account suggestions), `processQueue` every 5 minutes (provisional POs, unfinished bills, approval reminders),
 `dailyDigest` 08:00 SAST (email to admins). `sendDigestNow` shows today's digest any time.
 
 ## Go-live
@@ -102,6 +102,8 @@ Acceptance helpers:
   `poTimingReport`.
 - Slips: `runSlipTest`, `rerunFailedSlips`, `scoreSlipTest`, `armGeminiFailure`.
 - Bills: `checkBills_NHP` / `_HPB` / `_PK` / `checkBills_all` (reads each bill back from Xero), `armBillAttachFailure`.
+- Account suggestions: `testCoding` (engine cases), `testWordSuggestions_NHP` / `_HPB` / `_PK` (backtest of
+  learned words on the last 12 months of bills; changes nothing).
 - UAT: `createUatAccounts` (Script Property `UAT_PIN` first), `deactivateUatAccounts`, `cleanupTestPOs` (all three
   companies: deletes test bills, then test POs, in Xero; bins their slips; archives the "PO Desk Test Supplier …" and
   "QA Vendor …" contacts).

@@ -585,7 +585,10 @@ function codingFixture_() {
       H('NHP', 'sup-wrongco', '600', 5),
       H('PK', 'sup-pkonly', '600', 5),
     ],
-    config: { historyN: 5, defaultAccount: '465', extraAccounts: '', purchaseTaxType: 'INPUT3' },
+    words: buildWordIndex_([].concat(
+      Array(6).fill({ desc: 'Diesel 50ppm', code: '433' }), Array(2).fill({ desc: 'Diesel generator service', code: '404' }),
+      Array(3).fill({ desc: 'Stationery order', code: '420' }), Array(4).fill({ desc: 'NHP Global consulting', code: '465' })), 2),
+    config: { historyN: 5, defaultAccount: '465', extraAccounts: '', purchaseTaxType: 'INPUT3', wordMinShare: 0.6 },
   };
 }
 
@@ -621,6 +624,14 @@ function testCoding() {
     ['wrong company: default account that only exists in PK', () => run(withConfig({ defaultAccount: '600' }), null, null, 'x'), { source: 'none', accountCode: null }],
     // tax type
     ['tax: legacy 14% INPUT default replaced by INPUT3', () => run(F(), null, 'cat-raw', 'x'), { source: 'category', accountCode: '318', taxType: 'INPUT3' }],
+    // learned words (Stage 8)
+    ['words: what past bills with "diesel" were coded to', () => run(F(), null, null, 'Diesel for the bakkie'), { source: 'words', accountCode: '433', reasonHas: '“diesel” went to 433' }],
+    ['words: supplier history still comes first', () => run(F(), 'sup-fuel', null, 'stationery'), { source: 'history', accountCode: '433' }],
+    ['words: an explicit keyword rule beats learned words', () => run(F(), null, null, 'diesel and bleach'), { source: 'keyword', accountCode: '404' }],
+    ['words: learned words beat the chosen category', () => run(F(), null, 'cat-pack', 'diesel'), { source: 'words', accountCode: '433' }],
+    ['words: an archived account is never suggested', () => run(F(), null, null, 'stationery'), { source: 'fallback', accountCode: '465' }],
+    ['words: the company names teach nothing', () => run(F(), null, null, 'NHP Global'), { source: 'fallback', accountCode: '465' }],
+    ['words: unknown words fall through', () => run(F(), null, null, 'flowers for reception'), { source: 'fallback', accountCode: '465' }],
   ];
 
   const lines = [];

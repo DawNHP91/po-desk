@@ -19,6 +19,8 @@ const TABLES = Object.freeze({
   // status: '' (slip only) | POSTING | QUEUED | BILLED. steps_json: the Xero steps done so far (Stage 6).
   Bills: ['bill_id', 'po_id', 'entity_id', 'xero_invoice_id', 'slip_number', 'slip_date', 'supplier_vat_no', 'total_incl_zar', 'vat_zar', 'drive_file_id', 'ocr_json', 'flags', 'created_by', 'created_at', 'status', 'steps_json'],
   Queue: ['job_id', 'type', 'payload_json', 'attempts', 'next_run_at', 'last_error'],
+  // Learned words (Coding.gs): one row per word and account it was coded to; word '#lines' holds the line count.
+  WordIndex: ['entity_id', 'word', 'account_code', 'lines', 'synced_at'],
   AuditLog: ['ts', 'user_id', 'entity_id', 'action', 'ref', 'ok', 'detail_json'],
 });
 

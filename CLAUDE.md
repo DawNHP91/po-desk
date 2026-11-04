@@ -61,6 +61,7 @@ COMPOSIO_API_KEY, COMPOSIO_XERO_ACCOUNT_ID, COMPOSIO_USER_ID (if the API needs i
 - POs(po_id, idem_key, entity_id, xero_po_id, po_number, provisional_ref, status, buyer_user_id, pm_id, contact_id, supplier_name, description, category_id, account_code, tax_type, amount_incl_zar, suggestion_source, created_at, approver_user_id, decided_at, bill_id, decision_note, reminded_at)
 - Bills(bill_id, po_id, entity_id, xero_invoice_id, slip_number, slip_date, supplier_vat_no, total_incl_zar, vat_zar, drive_file_id, ocr_json, flags, created_by, created_at, status ['' | POSTING | QUEUED | BILLED], steps_json)
 - Queue(job_id, type, payload_json, attempts, next_run_at, last_error)
+- WordIndex(entity_id, word, account_code, lines, synced_at): learned words, rebuilt by the nightly sync; word '#lines' holds the number of lines learned from.
 - AuditLog(ts, user_id, entity_id, action, ref, ok, detail_json)
 PO status values: ISSUED, AWAITING_APPROVAL, DECLINED, PENDING_XERO, BILLED, CANCELLED.
 Read each tab once per request with getDataRange().getValues(); write whole rows with setValues; wrap PO creation in LockService.getScriptLock().
@@ -105,8 +106,9 @@ Xero's API has no field linking a bill to a PO; that link only exists when a bil
 suggestAccount(entityId, contactId, categoryId, description) returns { accountCode, taxType, source, reason }, trying in order:
 1. Supplier history: if this supplier's last N coded purchases in this company (Config, default 5) share one account code, use it.
 2. Keyword rules: Categories.keywords matched against the description (case-insensitive, whole words).
-3. Category default: Categories.account_code for the chosen category.
-4. Fallback: Config DEFAULT_ACCOUNT_<entity>, flagged "needs review".
+3. Learned words (added 4 Nov 2026): the words of the description scored against this company's bill lines of the last 12 months plus open PO Desk POs, and the accounts they were coded to (rarer words weigh more; the winner needs 2+ lines and Config WORD_MIN_SHARE, default 0.6, of the evidence; the companies' own names are ignored). Backtest on NHP's real bills: right 37% → 59% overall; learned words right 89% of the time they suggest.
+4. Category default: Categories.account_code for the chosen category.
+5. Fallback: Config DEFAULT_ACCOUNT_<entity>, flagged "needs review".
 Only return a code that is ACTIVE in that company's cached chart and valid for purchases. The buyer's final choice updates SupplierHistory. Categories and codes are per company because the three charts of accounts differ.
 
 ## Security

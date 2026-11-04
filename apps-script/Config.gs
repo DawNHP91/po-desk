@@ -3,7 +3,7 @@
  */
 
 const APP = Object.freeze({
-  VERSION: '0.7.0-stage7',
+  VERSION: '0.8.0-stage8',
   TZ: 'Africa/Johannesburg',
 });
 
@@ -52,6 +52,9 @@ const CONFIG_DEFAULTS = Object.freeze({
   WORKDAY_END_HOUR: 17,
   // The 08:00 digest lists issued POs still without a slip after this many days.
   DIGEST_OPEN_DAYS: 3,
+  // Learned-word suggestions: the winning account's share of the evidence (backtest, NHP, 4 Nov 2026:
+  // 0.6 was right 82–89% of the time it suggested; 0.5 suggests more often at 80%).
+  WORD_MIN_SHARE: 0.6,
 });
 
 class AppError extends Error {
