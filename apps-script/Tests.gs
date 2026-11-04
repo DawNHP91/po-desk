@@ -472,8 +472,8 @@ function cleanup(entity) {
 function ensureSpikeContact_(tenantId, ctx) {
   const c = xeroFindContactsByName(tenantId, SPIKE_CONTACT_NAME, ctx)[0];
   if (c) {
-    // A previous cleanup archives it; Xero won't raise a PO to an archived contact.
-    if (c.ContactStatus === 'ARCHIVED') xeroSetContactStatus(tenantId, c.ContactID, 'ACTIVE', ctx);
+    // A previous cleanup archived it, and Xero's API can't un-archive contacts.
+    if (c.ContactStatus === 'ARCHIVED') throw new AppError('SPIKE', SPIKE_CONTACT_NAME + ' is archived from an earlier run. Restore it in Xero (Contacts, Archived) to rerun this spike.');
     return c;
   }
   const created = xeroCreateContact(tenantId, { Name: SPIKE_CONTACT_NAME, IsSupplier: true }, ctx);
@@ -831,7 +831,14 @@ function randomStrongPin_() {
 
 // --- Stage 4: PO acceptance helpers ----------------------------------------------------------
 
+// Test suppliers are named "PO Desk Test Supplier …". Cleanup archives them, and Xero's API can't
+// un-archive, so each test run creates a fresh one (testSupplierName()) instead of reusing one.
 const TEST_SUPPLIER_NAME = 'PO Desk Test Supplier';
+function testSupplierName() {
+  const name = TEST_SUPPLIER_NAME + ' ' + Utilities.formatDate(new Date(), APP.TZ, 'yyyy-MM-dd HHmm');
+  console.log('Use this supplier name for the test POs: ' + name);
+  return name;
+}
 
 /** Arms a one-shot "Composio is down" failure for the next PO creation (see consumeForcedFailure_). */
 function armForcedPOFailure() {
@@ -873,8 +880,10 @@ function cleanupTestPOs() {
   const ent = TEST_BUYER.entity;
   const t = entityById_(ent).xero_tenant_id;
   const ctx = { ref: 'cleanup:test-pos' };
-  const supplierIds = readTable('Suppliers').rows.filter(s => s.entity_id === ent && normName_(s.name) === normName_(TEST_SUPPLIER_NAME)).map(s => s.contact_id);
-  xeroFindContactsByName(t, TEST_SUPPLIER_NAME, ctx).forEach(c => { if (supplierIds.indexOf(c.ContactID) === -1) supplierIds.push(c.ContactID); });
+  const isTestName = n => normName_(n).indexOf(normName_(TEST_SUPPLIER_NAME)) === 0;
+  const supplierIds = readTable('Suppliers').rows.filter(s => s.entity_id === ent && isTestName(s.name)).map(s => s.contact_id);
+  const inXero = xeroSearchContacts(t, TEST_SUPPLIER_NAME, ctx).filter(c => isTestName(c.Name));
+  inXero.forEach(c => { if (supplierIds.indexOf(c.ContactID) === -1) supplierIds.push(c.ContactID); });
 
   invalidateTable_('POs');
   const targets = readTable('POs').rows.filter(r => r.entity_id === ent && r.status !== PO_STATUS.CANCELLED &&
@@ -906,9 +915,13 @@ function cleanupTestPOs() {
     .sort((a, b) => b - a).forEach(n => sheet_('SupplierHistory').deleteRow(n));
   invalidateTable_('SupplierHistory');
 
+  // Only ACTIVE ones: Xero's API refuses to touch a contact that is already archived.
   const contacts = supplierIds.map(id => {
-    try { xeroSetContactStatus(t, id, 'ARCHIVED', ctx); return TEST_SUPPLIER_NAME + ' ' + id.slice(0, 8) + ' -> ' + (xeroGetContactById(t, id, ctx) || {}).ContactStatus; }
-    catch (err) { return id + ' ERROR ' + err.message; }
+    try {
+      const c = xeroGetContactById(t, id, ctx) || {};
+      if (c.ContactStatus === 'ACTIVE') xeroSetContactStatus(t, id, 'ARCHIVED', ctx);
+      return '"' + c.Name + '" -> ' + (xeroGetContactById(t, id, ctx) || {}).ContactStatus;
+    } catch (err) { return id + ' ERROR ' + err.message; }
   });
   const supRows = readTable('Suppliers').rows.filter(s => s.entity_id === ent && supplierIds.indexOf(s.contact_id) !== -1).map(s => s._row);
   supRows.sort((a, b) => b - a).forEach(n => sheet_('Suppliers').deleteRow(n));

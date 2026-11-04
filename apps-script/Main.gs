@@ -99,9 +99,10 @@ function actionSuggest_(req, ctx) {
 // --- createSupplier --------------------------------------------------------------------------
 
 /**
- * Finds the supplier before creating one: first the synced list, then Xero itself (archived
- * contacts included, because Xero refuses a second contact with the same name). An archived match
- * is switched back on rather than duplicated.
+ * Finds the supplier before creating one: first the synced list, then Xero itself, archived contacts
+ * included, because Xero refuses a second contact with the same name. Xero's API also refuses to
+ * edit archived contacts ("Archived contacts cannot currently be edited via the API", 4 Nov 2026),
+ * so an archived match cannot be switched back on from here: the buyer is told to ask an admin.
  */
 function actionCreateSupplier_(req, ctx) {
   const ent = requireBuyer_(ctx, req.payload.entityId);
@@ -118,20 +119,19 @@ function actionCreateSupplier_(req, ctx) {
   if (!lock.tryLock(PO_RULES.LOCK_WAIT_MS)) throw new AppError('BUSY', 'PO Desk is busy. Please try again.');
   try {
     const cached = getRefData(ent).suppliers.find(s => normName_(s.name) === key);
-    if (cached) return { supplier: { contactId: cached.contact_id, name: String(cached.name) }, existing: true, reactivated: false };
+    if (cached) return { supplier: { contactId: cached.contact_id, name: String(cached.name) }, existing: true };
 
     const t = entityById_(ent).xero_tenant_id;
     const matches = xeroSearchContacts(t, name, xctx).filter(c => normName_(c.Name) === key);
     let contact;
     let existing = false;
-    let reactivated = false;
     if (matches.length) {
-      contact = matches.find(c => c.ContactStatus === 'ACTIVE') || matches[0];
-      existing = true;
-      if (contact.ContactStatus === 'ARCHIVED') {
-        xeroSetContactStatus(t, contact.ContactID, 'ACTIVE', xctx);
-        reactivated = true;
+      contact = matches.find(c => c.ContactStatus === 'ACTIVE');
+      if (!contact) {
+        throw new AppError('SUPPLIER_ARCHIVED', '“' + matches[0].Name + '” is archived in ' + entityById_(ent).short_name +
+          '’s Xero. Ask your PO Desk admin to restore it in Xero (Contacts, Archived), or choose another supplier.');
       }
+      existing = true;
     } else {
       const fields = { Name: name, IsSupplier: true };
       if (vat) fields.TaxNumber = vat;
@@ -148,8 +148,8 @@ function actionCreateSupplier_(req, ctx) {
       contact = check;
     }
     addSupplierToRef_(ent, contact);
-    auditLog({ userId: ctx.user.user_id, entityId: ent, action: 'supplier.create', ok: true, ref: contact.ContactID, detail: { existing: existing, reactivated: reactivated } });
-    return { supplier: { contactId: contact.ContactID, name: String(contact.Name) }, existing: existing, reactivated: reactivated };
+    auditLog({ userId: ctx.user.user_id, entityId: ent, action: 'supplier.create', ok: true, ref: contact.ContactID, detail: { existing: existing } });
+    return { supplier: { contactId: contact.ContactID, name: String(contact.Name) }, existing: existing };
   } finally {
     lock.releaseLock();
   }

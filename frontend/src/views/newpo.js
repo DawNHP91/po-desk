@@ -128,8 +128,7 @@ export function render(root, ctx) {
         try {
           const r = await call('createSupplier', { entityId: ent, name: nameIn.value, vatNumber: vatIn.value });
           await auth.addSupplier(ent, r.supplier);
-          pickSupplier(r.supplier, r.reactivated ? 'This supplier was archived in Xero; it has been switched back on.'
-            : r.existing ? 'This supplier is already in Xero, so that one is used.' : '');
+          pickSupplier(r.supplier, r.existing ? 'This supplier is already in Xero, so that one is used.' : '');
         } catch (err) {
           add.disabled = false;
           msg.replaceChildren(alertBox(err.message));
