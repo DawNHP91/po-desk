@@ -1225,3 +1225,32 @@ function armBillAttachFailure() {
   PropertiesService.getScriptProperties().setProperty('TEST_FAIL_NEXT', 'proxy PUT /PurchaseOrders/');
   console.log('Armed: the next slip attachment to a PO fails once; the queue (every 5 minutes) finishes it.');
 }
+
+/**
+ * Why didn't an email arrive? Shows today's MailApp quota, sends a test email to the first admin and
+ * to everyone still waiting for a PIN link, and lists the last PIN-link and approval emails from the
+ * AuditLog (sent or not).
+ */
+function checkEmail() {
+  const quota = MailApp.getRemainingDailyQuota();
+  invalidateTable_('AuditLog');
+  invalidateTable_('Users');
+  const to = [ADMIN_SEED.email].concat(readTable('Users').rows.filter(u => u.pin_token_hash && isTrue_(u.active)).map(u => String(u.email)));
+  const sentTo = to.filter((e, i) => to.indexOf(e) === i).map(e => e + ' ' + (sendMail_(e, 'PO Desk: email test', 'If you can read this, PO Desk can send email to ' + e + '.') ? 'SENT' : 'NOT sent'));
+  const users = {};
+  readTable('Users').rows.forEach(u => { users[String(u.user_id)] = u; });
+  const rows = readTable('AuditLog').rows.slice(-400)
+    .filter(r => ['user.create', 'pin.link', 'po.approvers', 'po.reminder', 'digest.send'].indexOf(r.action) !== -1)
+    .slice(-15)
+    .map(r => {
+      const d = parseJson_(r.detail_json) || {};
+      const who = users[String(r.ref)] || {};
+      return {
+        when: Utilities.formatDate(new Date(r.ts), APP.TZ, 'd MMM HH:mm'), action: r.action,
+        to: who.email || (d.email || ''), emailed: d.linkEmailed !== undefined ? String(d.linkEmailed) : d.notified !== undefined ? 'notified ' + d.notified : d.sent !== undefined ? 'sent ' + d.sent : String(r.ok),
+      };
+    });
+  out_('checkEmail: ' + quota + ' emails left today. Test email: ' + sentTo.join('; '),
+    'Recent emails (AuditLog):\n' + table_(rows, ['when', 'action', 'to', 'emailed']) +
+    '\n\nPeople waiting for a PIN link:\n' + table_(readTable('Users').rows.filter(u => u.pin_token_hash).map(u => ({ email: u.email, active: String(u.active), linkExpires: u.pin_token_expires ? Utilities.formatDate(new Date(u.pin_token_expires), APP.TZ, 'd MMM HH:mm') : '' })), ['email', 'active', 'linkExpires']));
+}
