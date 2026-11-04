@@ -825,6 +825,7 @@ const BILL_RULES = Object.freeze({ NOTE_MAX_TRIES: 2, RATE_MAX: 30, RATE_WINDOW_
  * and runs the remaining steps. payload: { billId, fields, supplier?: { mode: 'keep' } |
  * { mode: 'existing', contactId } | { mode: 'new' } } — supplier is required when the slip's
  * supplier doesn't match the PO's. Submitting again returns the first bill (duplicate: true).
+ * A slip that looks like one already captured needs confirmDuplicate: true (paying twice is the risk).
  */
 function actionSubmitBill_(req, ctx) {
   const T = stepTimer_(ctx);
@@ -842,6 +843,9 @@ function actionSubmitBill_(req, ctx) {
   if (mismatch && !choice) {
     throw new AppError('SUPPLIER_CHOICE', 'The slip is from “' + f.supplierName + '”, but the PO is for “' + po.supplier_name + '”. Choose which supplier the bill is for.');
   }
+  // Warn, don't block — but a typed-in slip number is only checked here, so ask once before a second bill.
+  const dup = flags.find(x => x.code === 'DUPLICATE');
+  if (dup && p.confirmDuplicate !== true) throw new AppError('DUPLICATE_CHECK', dup.message + ' Create the bill anyway?');
   rateLimit_('bill', ctx.user.user_id, BILL_RULES.RATE_MAX, BILL_RULES.RATE_WINDOW_S);
   T.mark('prep');
 

@@ -233,6 +233,8 @@ export function render(root, ctx, params) {
 
     const message = h('div', { class: 'mt-4', 'aria-live': 'polite' });
     const LABEL = 'Create the bill in Xero';
+    let confirmDup = false;   // set once the server has said "looks like a duplicate" and the buyer goes ahead
+    [inp.supplierName, inp.slipNumber, inp.date, total.el].forEach((el) => el.addEventListener('input', () => { if (confirmDup) { confirmDup = false; save.textContent = LABEL; } }));
     const save = h('button', { type: 'button', class: 'mt-6 w-full rounded-2xl bg-brand px-4 py-4 text-lg font-semibold text-white touch-manipulation active:opacity-90 disabled:opacity-60' }, LABEL);
     save.addEventListener('click', async () => {
       if (save.disabled) return;
@@ -245,13 +247,14 @@ export function render(root, ctx, params) {
       save.textContent = 'Creating the bill…';
       message.replaceChildren();
       try {
-        const r = await call('submitBill', { billId, fields: v, supplier: asked ? { mode: choice.mode, contactId: choice.contactId } : undefined }, { timeoutMs: 90000 });
+        const r = await call('submitBill', { billId, fields: v, supplier: asked ? { mode: choice.mode, contactId: choice.contactId } : undefined, confirmDuplicate: confirmDup }, { timeoutMs: 90000 });
         if (alive) done(r);
       } catch (err) {
         save.disabled = false;
         save.textContent = LABEL;
         if (err.code === 'TIMEOUT') message.replaceChildren(alertBox('PO Desk is still working on it. Open the PO in a minute to see the bill; tapping again won’t make a second one.', 'warn'));
         else if (err.code === 'SUPPLIER_CHOICE') { shownFor = null; renderChoice(inp.supplierName.value); message.replaceChildren(alertBox(err.message)); }
+        else if (err.code === 'DUPLICATE_CHECK') { confirmDup = true; save.textContent = 'Create the bill anyway'; message.replaceChildren(alertBox(err.message, 'warn')); }
         else if (err.code !== 'AUTH_REQUIRED') message.replaceChildren(alertBox(err.message));
       }
     });
