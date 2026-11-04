@@ -224,8 +224,8 @@ function proposeCategories() {
 // PINs are always chosen by the person themselves; nothing here prints or stores a PIN in a file.
 
 const ADMIN_SEED = Object.freeze({ name: 'Dawid Groenewald', email: 'dawie@nhpglobalgroup.com', role: 'admin', entities: ['HPB', 'NHP', 'PK'] });
-// po_limit_zar per company, confirmed with Dawie before seeding (CLAUDE.md). null = not confirmed yet.
-const ADMIN_PO_LIMIT_ZAR = Object.freeze({ HPB: null, NHP: null, PK: null });
+// po_limit_zar per company, confirmed by Dawie on 4 Nov 2026 (CLAUDE.md: ask before seeding).
+const ADMIN_PO_LIMIT_ZAR = Object.freeze({ HPB: 1500, NHP: 1500, PK: 1500 });
 
 const TEST_BUYER = Object.freeze({ name: 'Test Buyer NHP', email: 'test.buyer@po-desk.test', role: 'buyer', entity: 'NHP', poLimitZar: 500 });
 
