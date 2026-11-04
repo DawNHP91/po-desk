@@ -29,6 +29,8 @@ function actionLogin_(req) {
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
   try {
+    // The tab was loaded before the lock; re-read so concurrent attempts count correctly.
+    if (!fastRead_(['Users'], true)) invalidateTable_('Users');
     user = findUserByEmail_(email);
     // Unknown emails get the same answers (incorrect, then locked) so the login form can't be
     // used to discover who has an account.

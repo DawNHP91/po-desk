@@ -931,3 +931,62 @@ function cleanupTestPOs() {
   out_('cleanupTestPOs', table_(report, ['po', 'amount', 'was', 'xero', 'row']) + '\n\nContacts: ' + (contacts.join('; ') || 'none') +
     '\nQueue jobs removed for ' + poIds.length + ' PO(s); supplier history cleared; Suppliers rows removed: ' + supRows.length + '.');
 }
+
+/**
+ * Proves the Sheets API fast path gives exactly what SpreadsheetApp gives, on the live Sheet:
+ * every tab read both ways and compared cell by cell, then one tricky row written the fast way and
+ * read back the slow way. Run once after deploying; createPO relies on this equivalence.
+ */
+function testFastSheets() {
+  const lines = [];
+  let failures = 0;
+  const check = (label, cond, detail) => { if (!cond) failures++; lines.push((cond ? 'PASS ' : 'FAIL ') + label + (cond ? '' : ' -> ' + detail)); };
+  const same = (a, b) => (a instanceof Date || b instanceof Date)
+    ? (a instanceof Date && b instanceof Date && Math.abs(a - b) < 1000)
+    : String(a) === String(b) && typeof a === typeof b;
+
+  Object.keys(TABLES).forEach(name => {
+    invalidateTable_(name);
+    const t0 = Date.now();
+    const slow = readTable(name);
+    const slowMs = Date.now() - t0;
+    const t1 = Date.now();
+    const ok = fastRead_([name], true);
+    const fastMs = Date.now() - t1;
+    if (!ok) { check(name + ': fast read available', false, 'fast path is off (see warnings)'); return; }
+    const fast = readTable(name);
+    let diff = '';
+    if (fast.rows.length !== slow.rows.length) diff = 'rows ' + fast.rows.length + ' vs ' + slow.rows.length;
+    for (let i = 0; !diff && i < slow.rows.length; i++) {
+      if (fast.rows[i]._row !== slow.rows[i]._row) { diff = 'row number ' + fast.rows[i]._row + ' vs ' + slow.rows[i]._row; break; }
+      slow.headers.forEach(h => {
+        if (!diff && h && !same(fast.rows[i][h], slow.rows[i][h])) diff = 'row ' + slow.rows[i]._row + ' ' + h + ': ' + JSON.stringify(fast.rows[i][h]) + ' (' + typeof fast.rows[i][h] + ') vs ' + JSON.stringify(slow.rows[i][h]) + ' (' + typeof slow.rows[i][h] + ')';
+      });
+    }
+    check(pad_(name, 16) + slow.rows.length + ' rows identical (slow ' + slowMs + ' ms, fast ' + fastMs + ' ms)', !diff, diff);
+  });
+
+  const t2 = Date.now();
+  fastRead_(['Users', 'UserEntities', 'Entities', 'Config', 'PaymentMethods', 'Categories', 'SupplierHistory', 'POs'], true);
+  lines.push('     createPO\'s 8 tabs in one fast read: ' + (Date.now() - t2) + ' ms');
+
+  const when = new Date(Math.floor(Date.now() / 1000) * 1000);
+  const marker = 'fastpath-' + Utilities.getUuid().slice(0, 8);
+  const probe = { ts: when, user_id: '0123', entity_id: '1/2', action: '=1+1', ref: marker, ok: true, detail_json: '-5' };
+  try {
+    sheetsFetch_([appendReq_('AuditLog', [probe])]);
+    invalidateTable_('AuditLog');
+    const back = readTable('AuditLog').rows.find(r => r.ref === marker);
+    check('fast write lands', !!back, 'row not found');
+    if (back) {
+      check('date written fast reads back as the same Date', back.ts instanceof Date && Math.abs(back.ts - when) < 1000, String(back.ts));
+      check('"0123", "1/2", "=1+1", "-5" stay text', back.user_id === '0123' && back.entity_id === '1/2' && back.action === '=1+1' && back.detail_json === '-5',
+        JSON.stringify([back.user_id, back.entity_id, back.action, back.detail_json]));
+      check('boolean stays boolean', back.ok === true, JSON.stringify(back.ok));
+      sheet_('AuditLog').deleteRow(back._row);
+    }
+  } catch (err) {
+    check('fast write', false, err.message);
+  }
+  out_('testFastSheets: ' + (failures ? failures + ' FAILURE(S)' : 'all passed') + ' (sheet timezone ' + (dbCache_.tz || '?') + ')', lines.join('\n'));
+}

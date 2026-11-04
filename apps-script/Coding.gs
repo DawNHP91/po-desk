@@ -202,3 +202,28 @@ function keywordMatches_(descLower, keyword) {
 function isTrue_(v) {
   return v === true || String(v).toUpperCase() === 'TRUE';
 }
+
+/**
+ * recordChoice() as write requests for the PO hot path, planned from rows read inside the lock.
+ * Returns { reqs } for parallel Sheets API writes, or null when rows must be deleted (the supplier's
+ * window dropped a code); deletions are rare and go through recordChoice() instead.
+ */
+function planChoiceWrites_(ent, contactId, accountCode, freshRows, n) {
+  const current = freshRows.filter(r => r.entity_id === ent && String(r.contact_id) === String(contactId));
+  const next = applyChoice_(current.map(r => ({ account_code: String(r.account_code), uses: Number(r.uses) || 0, last_used: r.last_used })),
+    String(accountCode), new Date(), n);
+  const byCode = {};
+  next.forEach(r => { byCode[r.account_code] = r; });
+  if (current.some(r => !byCode[String(r.account_code)])) return null;
+  const reqs = [];
+  current.forEach(r => {
+    const nr = byCode[String(r.account_code)];
+    if (Number(r.uses) !== nr.uses || String(r.last_used) !== String(nr.last_used)) {
+      reqs.push(updateReq_('SupplierHistory', r._row, { entity_id: ent, contact_id: contactId, account_code: nr.account_code, uses: nr.uses, last_used: nr.last_used }));
+    }
+    delete byCode[String(r.account_code)];
+  });
+  const fresh = Object.keys(byCode).map(c => ({ entity_id: ent, contact_id: contactId, account_code: c, uses: byCode[c].uses, last_used: byCode[c].last_used }));
+  if (fresh.length) reqs.push(appendReq_('SupplierHistory', fresh));
+  return { reqs: reqs };
+}

@@ -101,11 +101,147 @@ function auditLog(entry) {
     ok: entry.ok === true,
     detail_json: JSON.stringify(entry.detail || {}),
   };
+  if (auditBuffer_.on) { auditBuffer_.rows.push(row); return; }
   try {
     if (!getOptionalSecret_('SHEET_ID')) throw new Error('SHEET_ID not set');
     // Bypass appendRow's header lookup: AuditLog's columns are fixed and it is written on every call.
     sheet_('AuditLog').appendRow(TABLES.AuditLog.map(h => cell_(row[h])));
   } catch (err) {
     console.log('AUDIT (sheet unavailable: ' + err.message + ') ' + JSON.stringify(row));
+  }
+}
+
+// --- Fast path: Sheets REST API (Stage 4 performance) ----------------------------------------
+// The PO hot path needs ~8 tabs. SpreadsheetApp reads them one round trip at a time (~250 ms each;
+// measured 4 Nov 2026: 1.1 s before the session was even checked). The Sheets API reads any number
+// of tabs in one call and lets independent writes run in parallel (UrlFetchApp.fetchAll).
+// Any failure switches this execution back to SpreadsheetApp, so the app never depends on it.
+
+const DATE_COLUMNS = Object.freeze(['locked_until', 'pin_token_expires', 'created_at', 'synced_at', 'last_used', 'decided_at', 'next_run_at', 'ts', 'slip_date']);
+const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets/';
+
+/** Runs Sheets REST requests in parallel. req: { method, path, payload }. Returns parsed bodies; throws on any error. */
+function sheetsFetch_(reqs) {
+  const token = ScriptApp.getOAuthToken();
+  const base = SHEETS_API + encodeURIComponent(getSecret_('SHEET_ID'));
+  const out = UrlFetchApp.fetchAll(reqs.map(r => ({
+    url: base + r.path,
+    method: r.method || 'get',
+    contentType: 'application/json',
+    payload: r.payload ? JSON.stringify(r.payload) : undefined,
+    headers: { Authorization: 'Bearer ' + token },
+    muteHttpExceptions: true,
+  })));
+  return out.map((res, i) => {
+    const code = res.getResponseCode();
+    if (code < 200 || code >= 300) throw new Error('Sheets API ' + code + ' on ' + reqs[i].path.split('?')[0] + ': ' + truncate_(res.getContentText(), 200));
+    return JSON.parse(res.getContentText() || '{}');
+  });
+}
+
+/** The spreadsheet's timezone offset, so serial date numbers become the same instants getValues() gives. */
+function sheetTzOffsetMs_() {
+  if (dbCache_.tzOffsetMs !== undefined) return dbCache_.tzOffsetMs;
+  const props = PropertiesService.getScriptProperties();
+  let tz = props.getProperty('SHEET_TZ');
+  if (!tz) { tz = db_().getSpreadsheetTimeZone(); props.setProperty('SHEET_TZ', tz); }
+  const z = Utilities.formatDate(new Date(), tz, 'Z');            // e.g. +0200
+  const sign = z.charAt(0) === '-' ? -1 : 1;
+  dbCache_.tz = tz;
+  dbCache_.tzOffsetMs = sign * (Number(z.slice(1, 3)) * 60 + Number(z.slice(3, 5))) * 60000;
+  return dbCache_.tzOffsetMs;
+}
+
+/**
+ * Loads tabs into the per-execution cache in one API call. fresh: re-read even if cached (inside a
+ * lock, before a write). Returns false if the fast path is unavailable (callers fall back silently).
+ */
+function fastRead_(names, fresh) {
+  const want = fresh ? names.slice() : names.filter(n => !dbCache_.tables[n]);
+  if (!want.length) return true;
+  if (dbCache_.fastOff) return false;
+  try {
+    const offset = sheetTzOffsetMs_();
+    const qs = want.map(n => 'ranges=' + encodeURIComponent("'" + n + "'")).join('&') +
+      '&valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER&majorDimension=ROWS';
+    const res = sheetsFetch_([{ path: '/values:batchGet?' + qs }])[0];
+    (res.valueRanges || []).forEach((vr, i) => { dbCache_.tables[want[i]] = tableFromValues_(want[i], vr.values || [], offset); });
+    return true;
+  } catch (err) {
+    dbCache_.fastOff = true;
+    console.warn('Fast read unavailable, using SpreadsheetApp: ' + err.message);
+    return false;
+  }
+}
+
+/** Same shape as readTable(): rows are objects with a hidden 1-based _row; dates become Date objects. */
+function tableFromValues_(name, values, offsetMs) {
+  const headers = (values[0] || []).map(h => String(h).trim());
+  const rows = [];
+  for (let i = 1; i < values.length; i++) {
+    const r = values[i] || [];
+    if (!r.some(c => c !== '' && c !== null && c !== undefined)) continue;
+    const o = {};
+    headers.forEach((h, j) => {
+      if (!h) return;
+      let v = r[j];
+      if (v === undefined || v === null) v = '';
+      if (typeof v === 'number' && DATE_COLUMNS.indexOf(h) !== -1) v = new Date(Math.round((v - 25569) * 86400000) - offsetMs);
+      o[h] = v;
+    });
+    Object.defineProperty(o, '_row', { value: i + 1, enumerable: false, writable: true });
+    rows.push(o);
+  }
+  return { name: name, headers: headers, rows: rows };
+}
+
+/**
+ * Converts a value for a USER_ENTERED write. Every string gets a leading apostrophe so Sheets keeps
+ * it as text: never a formula, and never "1/2" turned into a date. Dates are written as local
+ * date-times so the cell is a real date, as with setValues.
+ */
+function userEntered_(v) {
+  if (v === undefined || v === null) return '';
+  if (v instanceof Date) { sheetTzOffsetMs_(); return Utilities.formatDate(v, dbCache_.tz, 'yyyy-MM-dd HH:mm:ss'); }
+  if (typeof v === 'number' || typeof v === 'boolean') return v;
+  if (typeof v === 'object') return "'" + JSON.stringify(v);
+  return v === '' ? '' : "'" + String(v);
+}
+
+function headersOf_(name) {
+  return dbCache_.tables[name] ? dbCache_.tables[name].headers : TABLES[name];
+}
+
+/** Request to append whole rows (atomic, grows the sheet as needed). */
+function appendReq_(name, objs) {
+  const h = headersOf_(name);
+  return { method: 'post', path: '/values/' + encodeURIComponent("'" + name + "'!A1") + ':append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS',
+    payload: { values: objs.map(o => h.map(k => userEntered_(o[k]))) } };
+}
+
+/** Request to overwrite one whole row in place. */
+function updateReq_(name, rowNum, obj) {
+  const h = headersOf_(name);
+  return { method: 'put', path: '/values/' + encodeURIComponent("'" + name + "'!A" + rowNum) + '?valueInputOption=USER_ENTERED',
+    payload: { values: [h.map(k => userEntered_(obj[k]))] } };
+}
+
+// --- Buffered audit (one write per request instead of one per event) -------------------------
+
+const auditBuffer_ = { on: false, rows: [] };
+
+function startAuditBuffer_() { auditBuffer_.on = true; auditBuffer_.rows = []; }
+
+/** Writes buffered audit rows in one append; falls back to row-by-row writes. Never throws. */
+function flushAudit_() {
+  const rows = auditBuffer_.rows;
+  auditBuffer_.on = false;
+  auditBuffer_.rows = [];
+  if (!rows.length) return;
+  try {
+    if (dbCache_.fastOff) throw new Error('fast path off');
+    sheetsFetch_([appendReq_('AuditLog', rows)]);
+  } catch (err) {
+    rows.forEach(r => { try { sheet_('AuditLog').appendRow(TABLES.AuditLog.map(h => cell_(r[h]))); } catch (e) { console.log('AUDIT ' + JSON.stringify(r)); } });
   }
 }

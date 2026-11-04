@@ -317,47 +317,69 @@ const QUEUE_RULES = Object.freeze({
 });
 
 function processQueue() {
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(10000)) { console.log('processQueue: another run holds the lock; skipping.'); return; }
   const started = Date.now();
-  const results = [];
+  const lock = LockService.getScriptLock();
+
+  // 1. Claim due jobs under a short lock: a 15-minute lease keeps an overlapping run off them.
+  if (!lock.tryLock(10000)) { console.log('processQueue: lock busy; skipping this run.'); return; }
+  let claimed = [];
   try {
     invalidateTable_('Queue');
     const now = new Date();
     // Jobs that gave up have a blank next_run_at and are left for an admin.
     const due = readTable('Queue').rows.filter(j => j.job_id && j.next_run_at !== '' && new Date(j.next_run_at) <= now);
-    const doneRows = [];
-    for (let i = 0; i < due.length; i++) {
-      const job = due[i];
-      if (Date.now() - started > QUEUE_RULES.BUDGET_MS) break;
-      try {
-        const out = runQueueJob_(job);
-        doneRows.push(job._row);
-        results.push({ job: job.job_id, type: job.type, ok: true, result: out });
-      } catch (err) {
-        const attempts = (Number(job.attempts) || 0) + 1;
-        const giveUp = attempts >= QUEUE_RULES.MAX_ATTEMPTS;
-        const waitMin = Math.min(QUEUE_RULES.MAX_WAIT_MIN, 5 * Math.pow(2, attempts - 1));
-        updateRowById('Queue', 'job_id', job.job_id, {
-          attempts: attempts,
-          next_run_at: giveUp ? '' : new Date(Date.now() + waitMin * 60000),
-          last_error: (giveUp ? 'GAVE UP: ' : '') + truncate_(err.message, 300),
-        });
-        if (giveUp) alertAdmins_('a queued job gave up', 'Job ' + job.job_id + ' (' + job.type + ') failed ' + attempts + ' times.\nLast error: ' + err.message + '\nPayload: ' + job.payload_json);
-        results.push({ job: job.job_id, type: job.type, ok: false, attempts: attempts, error: err.message });
-      }
+    const lease = new Date(now.getTime() + 15 * 60000);
+    due.forEach(j => updateRowById('Queue', 'job_id', j.job_id, { next_run_at: lease }));
+    claimed = due.map(j => ({ job_id: j.job_id, type: j.type, payload_json: j.payload_json, attempts: Number(j.attempts) || 0 }));
+  } finally {
+    lock.releaseLock();
+  }
+  if (!claimed.length) return [];
+
+  // 2. Do the work WITHOUT the lock, so a buyer's createPO never waits behind a Xero call here.
+  const results = [];
+  claimed.forEach(job => {
+    if (Date.now() - started > QUEUE_RULES.BUDGET_MS) { results.push({ job: job.job_id, type: job.type, skipped: true }); return; }
+    try {
+      results.push({ job: job.job_id, type: job.type, ok: true, result: runQueueJob_(job) });
+    } catch (err) {
+      results.push({ job: job.job_id, type: job.type, ok: false, attempts: job.attempts + 1, error: err.message, payload: job.payload_json });
     }
+  });
+
+  // 3. Record outcomes under a short lock.
+  const giveUps = [];
+  lock.waitLock(20000);
+  try {
+    invalidateTable_('Queue');
+    const rows = readTable('Queue').rows;
+    const doneRows = [];
+    results.forEach(r => {
+      const row = rows.find(x => x.job_id === r.job);
+      if (!row) return;
+      if (r.ok) { doneRows.push(row._row); return; }
+      if (r.skipped) { updateRowById('Queue', 'job_id', r.job, { next_run_at: new Date() }); return; }
+      const giveUp = r.attempts >= QUEUE_RULES.MAX_ATTEMPTS;
+      const waitMin = Math.min(QUEUE_RULES.MAX_WAIT_MIN, 5 * Math.pow(2, r.attempts - 1));
+      updateRowById('Queue', 'job_id', r.job, {
+        attempts: r.attempts,
+        next_run_at: giveUp ? '' : new Date(Date.now() + waitMin * 60000),
+        last_error: (giveUp ? 'GAVE UP: ' : '') + truncate_(r.error, 300),
+      });
+      if (giveUp) giveUps.push(r);
+    });
     // Bottom-up so earlier row numbers stay valid while deleting.
-    doneRows.sort((a, b) => b - a).forEach(r => sheet_('Queue').deleteRow(r));
+    doneRows.sort((a, b) => b - a).forEach(n => sheet_('Queue').deleteRow(n));
     invalidateTable_('Queue');
   } finally {
     lock.releaseLock();
   }
-  if (results.length) {
-    auditLog({ action: 'queue.run', ok: results.every(r => r.ok), detail: { ms: Date.now() - started, results: results } });
-    console.log('processQueue ' + JSON.stringify(results, null, 2));
-  }
-  return results;
+  giveUps.forEach(r => alertAdmins_('a queued job gave up', 'Job ' + r.job + ' (' + r.type + ') failed ' + r.attempts + ' times.\nLast error: ' + r.error + '\nPayload: ' + r.payload));
+
+  const summary = results.map(r => ({ job: r.job, type: r.type, ok: !!r.ok, result: r.result, error: r.error, skipped: r.skipped }));
+  auditLog({ action: 'queue.run', ok: results.every(r => r.ok), detail: { ms: Date.now() - started, results: summary } });
+  console.log('processQueue ' + JSON.stringify(summary, null, 2));
+  return summary;
 }
 
 function runQueueJob_(job) {
@@ -387,8 +409,19 @@ function finishProvisionalPO_(payload) {
   if (!xeroPo) xeroPo = createXeroPo_(po, pm, buyer.name, xeroStatus, po.provisional_ref, ctx);
 
   const status = xeroStatus === 'SUBMITTED' ? PO_STATUS.AWAITING_APPROVAL : PO_STATUS.ISSUED;
-  updateRowById('POs', 'po_id', po.po_id, { xero_po_id: xeroPo.PurchaseOrderID, po_number: xeroPo.PurchaseOrderNumber, status: status });
-  const fresh = findBy('POs', 'po_id', po.po_id)[0];
+  // The POs tab is shared with createPO, so the write (only) happens under the lock.
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  let fresh;
+  try {
+    invalidateTable_('POs');
+    const cur = findBy('POs', 'po_id', po.po_id)[0];
+    if (!cur || cur.status !== PO_STATUS.PENDING_XERO) return 'already ' + (cur ? cur.status : 'gone') + ' (Xero PO ' + xeroPo.PurchaseOrderNumber + ' left as is)';
+    updateRowById('POs', 'po_id', po.po_id, { xero_po_id: xeroPo.PurchaseOrderID, po_number: xeroPo.PurchaseOrderNumber, status: status });
+    fresh = findBy('POs', 'po_id', po.po_id)[0];
+  } finally {
+    lock.releaseLock();
+  }
   notifyBuyerConverted_(fresh, buyer);
   if (status === PO_STATUS.AWAITING_APPROVAL) {
     const acct = getRefData(ent).accounts.find(a => String(a.code) === String(po.account_code));

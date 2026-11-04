@@ -7,17 +7,20 @@
 
 // Handlers get (req, ctx); ctx is the verified session ({ user, grants, t0, authMs }) and is null
 // only for public routes. Wrapped in arrows so functions in other files are looked up at call time.
+// `tabs`: Sheet tabs the action needs, read in ONE Sheets API call before the session check
+// (Db.gs fastRead_). The session check itself always needs Users, UserEntities and Entities.
+const AUTH_TABS = ['Users', 'UserEntities', 'Entities', 'Config'];
 const ROUTES = {
   ping: { public: true, fn: () => ({ pong: true, version: APP.VERSION }) },
-  login: { public: true, fn: (req) => actionLogin_(req) },
+  login: { public: true, tabs: AUTH_TABS, fn: (req) => actionLogin_(req) },
   logout: { public: true, fn: (req) => actionLogout_(req) },
-  me: { fn: (req, ctx) => actionMe_(req, ctx) },
-  refData: { fn: (req, ctx) => actionRefData_(req, ctx) },
-  suggest: { fn: (req, ctx) => actionSuggest_(req, ctx) },
-  createSupplier: { fn: (req, ctx) => actionCreateSupplier_(req, ctx) },
-  createPO: { fn: (req, ctx) => actionCreatePO_(req, ctx) },
-  listPOs: { fn: (req, ctx) => actionListPOs_(req, ctx) },
-  getPO: { fn: (req, ctx) => actionGetPO_(req, ctx) },
+  me: { tabs: AUTH_TABS, fn: (req, ctx) => actionMe_(req, ctx) },
+  refData: { tabs: AUTH_TABS.concat(['PaymentMethods', 'Categories']), fn: (req, ctx) => actionRefData_(req, ctx) },
+  suggest: { tabs: AUTH_TABS.concat(['Categories', 'SupplierHistory']), fn: (req, ctx) => actionSuggest_(req, ctx) },
+  createSupplier: { tabs: AUTH_TABS, fn: (req, ctx) => actionCreateSupplier_(req, ctx) },
+  createPO: { tabs: AUTH_TABS.concat(['PaymentMethods', 'Categories', 'SupplierHistory', 'POs']), fn: (req, ctx) => actionCreatePO_(req, ctx) },
+  listPOs: { tabs: AUTH_TABS.concat(['POs', 'PaymentMethods']), fn: (req, ctx) => actionListPOs_(req, ctx) },
+  getPO: { tabs: AUTH_TABS.concat(['POs', 'PaymentMethods']), fn: (req, ctx) => actionGetPO_(req, ctx) },
 };
 
 const PO_STATUS = Object.freeze({
@@ -40,15 +43,19 @@ function doGet() {
 function doPost(e) {
   const t0 = Date.now();
   let envelope;
+  startAuditBuffer_();
   try {
     const req = parseRequest_(e);
     const route = Object.prototype.hasOwnProperty.call(ROUTES, req.action) ? ROUTES[req.action] : null;
     if (!route) throw new AppError('UNKNOWN_ACTION', 'Unknown action.');
+    if (route.tabs) fastRead_(route.tabs);
     const ctx = route.public ? null : requireSession_(req.token);
     if (ctx) { ctx.t0 = t0; ctx.authMs = Date.now() - t0; }
     envelope = { ok: true, data: route.fn(req, ctx) };
   } catch (err) {
     envelope = { ok: false, error: publicError_(err) };
+  } finally {
+    flushAudit_();
   }
   return json_(envelope);
 }
@@ -212,8 +219,9 @@ function actionCreatePO_(req, ctx) {
   let row;
   let failure = null;
   try {
-    // Inside the lock, so a double-tapped Submit waits here and then finds the first PO.
-    invalidateTable_('POs');
+    // Inside the lock, so a double-tapped Submit waits here and then finds the first PO. Re-read:
+    // the copy loaded before the lock may predate another buyer's PO.
+    if (!fastRead_(['POs', 'SupplierHistory'], true)) { invalidateTable_('POs'); invalidateTable_('SupplierHistory'); }
     const dup = readTable('POs').rows.find(r => r.idem_key === idemKey);
     if (dup) {
       if (String(dup.buyer_user_id) !== String(ctx.user.user_id)) throw new AppError('FORBIDDEN', 'That request key belongs to someone else.');
@@ -246,19 +254,50 @@ function actionCreatePO_(req, ctx) {
       // Xero refused the data itself; retrying later would fail the same way, so tell the buyer now.
       auditLog({ userId: ctx.user.user_id, entityId: ent, action: 'po.create', ok: false, detail: { rejected: failure.message, ms: T.all() } });
       throw new AppError('XERO_REJECTED', 'Xero didn’t accept this PO: ' + failure.message);
-    } else {
+    }
+    let job = null;
+    if (!xeroPo) {
       // Composio or Xero unavailable: a provisional reference now, the real PO from the queue later.
       row.status = PO_STATUS.PENDING_XERO;
       row.provisional_ref = nextProvisionalRef_(ent, row.created_at);
-      appendRow('Queue', {
+      job = {
         job_id: Utilities.getUuid(), type: 'createPO', payload_json: JSON.stringify({ poId: row.po_id, xeroStatus: xeroStatus }),
         attempts: 0, next_run_at: new Date(), last_error: failure ? truncate_(failure.message, 300) : '',
-      });
+      };
     }
-    appendRow('POs', row);
+    // The POs row, the queue job and the learnt account choice go out together. The choice is learnt
+    // even when Xero is down: it was still the buyer's decision.
+    const plan = planChoiceWrites_(ent, supplier.contact_id, accountCode, readTable('SupplierHistory').rows, Number(data.config.historyN));
+    let rowWritten = false;
+    let choiceDone = false;
+    if (!dbCache_.fastOff) {
+      try {
+        sheetsFetch_([appendReq_('POs', [row])].concat(job ? [appendReq_('Queue', [job])] : [], plan ? plan.reqs : []));
+        rowWritten = true;
+        choiceDone = !!plan;
+      } catch (err) {
+        // Some of the parallel writes may have landed. If the POs row did, only add what is provably
+        // missing; the account choice is not re-applied (no double count) and the nightly sync
+        // rebuilds it from this POs row anyway.
+        console.warn('Fast write failed, using SpreadsheetApp: ' + err.message);
+        dbCache_.fastOff = true;
+        invalidateTable_('POs');
+        invalidateTable_('Queue');
+        if (readTable('POs').rows.some(r => r.po_id === row.po_id)) {
+          rowWritten = true;
+          choiceDone = true;
+          if (job && !readTable('Queue').rows.some(j => j.job_id === job.job_id)) appendRow('Queue', job);
+        }
+      }
+    }
+    if (!rowWritten) {
+      if (job) appendRow('Queue', job);
+      appendRow('POs', row);
+    }
     T.mark('write');
-    // Learn the buyer's choice even when Xero is down: it was still their decision.
-    try { recordChoice(ent, supplier.contact_id, accountCode); } catch (err) { console.warn('recordChoice failed: ' + err.message); }
+    if (!choiceDone) {
+      try { recordChoice(ent, supplier.contact_id, accountCode); } catch (err) { console.warn('recordChoice failed: ' + err.message); }
+    }
     T.mark('choice');
   } finally {
     lock.releaseLock();
