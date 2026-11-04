@@ -3,7 +3,7 @@
  */
 
 const APP = Object.freeze({
-  VERSION: '0.6.0-stage6',
+  VERSION: '0.7.0-stage7',
   TZ: 'Africa/Johannesburg',
 });
 
@@ -44,6 +44,14 @@ const CONFIG_DEFAULTS = Object.freeze({
   APP_VERSION: APP.VERSION,
   // 'proxy' = Xero Attachments API through Composio's proxy; 'tool' = Composio file upload + XERO_UPLOAD_ATTACHMENT.
   ATTACHMENT_ROUTE: 'proxy',
+  // Stage 7. Links in emails (approvals, Set PIN) point here.
+  APP_URL: 'https://po.pharmakaru.co.za/',
+  // An approval still waiting after this many working hours (Mon–Fri, WORKDAY_START–WORKDAY_END SAST) gets one reminder.
+  APPROVAL_REMINDER_HOURS: 4,
+  WORKDAY_START_HOUR: 8,
+  WORKDAY_END_HOUR: 17,
+  // The 08:00 digest lists issued POs still without a slip after this many days.
+  DIGEST_OPEN_DAYS: 3,
 });
 
 class AppError extends Error {

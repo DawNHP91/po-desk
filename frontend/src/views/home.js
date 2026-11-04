@@ -1,11 +1,13 @@
-// Home: the main actions for the chosen company. Approvals arrives in a later stage.
+// Home: the main actions for the chosen company, plus Approvals (approvers) and People (admins).
 import { h, icon, alertBox } from './ui.js';
+import { call } from '../api.js';
 
 const ICONS = {
   newPo: ['M12 5v14', 'M5 12h14'],
   slip: ['M4 7h3l2-3h6l2 3h3v12H4z', 'M12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z'],
   list: ['M8 6h13', 'M8 12h13', 'M8 18h13', 'M3 6h.01', 'M3 12h.01', 'M3 18h.01'],
   approve: ['M9 12l2 2 4-4', 'M12 3l7 4v5c0 4.5-3 8-7 9-4-1-7-4.5-7-9V7z'],
+  people: ['M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1', 'M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M22 19v-1a4 4 0 0 0-3-3.87', 'M16 4.13a3 3 0 0 1 0 5.74'],
 };
 
 export function render(root, ctx) {
@@ -14,7 +16,6 @@ export function render(root, ctx) {
   const company = auth.selectedCompany();
   const notice = h('div', { class: 'mt-4', 'aria-live': 'polite' });
 
-  const soon = (what) => () => notice.replaceChildren(alertBox(what + ' arrives in the next stage of the build.', 'warn'));
   const tile = (label, sub, paths, onclick) => h('button', {
     type: 'button',
     class: 'flex aspect-square flex-col justify-between rounded-2xl bg-white p-4 text-left shadow-sm ring-1 ring-slate-200 touch-manipulation active:bg-slate-50',
@@ -40,7 +41,16 @@ export function render(root, ctx) {
       tile('My POs', 'Numbers and status', ICONS.list, () => ctx.go('/pos')),
     );
   }
-  if (me.canApproveAny) tiles.push(tile('Approvals', 'POs over a limit', ICONS.approve, soon('Approvals')));
+  if (me.canApproveAny) {
+    const t = tile('Approvals', 'POs over a limit', ICONS.approve, () => ctx.go('/approvals'));
+    tiles.push(t);
+    // How many are waiting, filled in when it arrives; the tile works without it.
+    call('listApprovals', {}).then((r) => {
+      const sub = t.lastElementChild && t.lastElementChild.lastElementChild;
+      if (sub) sub.textContent = r.items.length ? `${r.items.length} waiting for you` : 'Nothing waiting';
+    }).catch(() => {});
+  }
+  if (me.isAdmin) tiles.push(tile('People', 'Who can buy and approve', ICONS.people, () => ctx.go('/people')));
   if (tiles.length) root.append(h('div', { class: 'mt-6 grid grid-cols-2 gap-3' }, tiles));
   root.append(notice);
 

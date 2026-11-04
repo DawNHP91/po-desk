@@ -845,8 +845,14 @@ function testSupplierName() {
 
 /** Arms a one-shot "Composio is down" failure for the next PO creation (see consumeForcedFailure_). */
 function armForcedPOFailure() {
-  PropertiesService.getScriptProperties().setProperty('TEST_FAIL_NEXT', 'proxy PUT /PurchaseOrders');
+  PropertiesService.getScriptProperties().setProperty('TEST_FAIL_NEXT', 'proxy PUT /PurchaseOrders$');
   console.log('Armed: the next PO creation will fail all 3 attempts and get a provisional ref. processQueue converts it.');
+}
+
+/** UAT "Composio outage", once per company: the next THREE PO creations fail and get provisional refs. */
+function armOutageForUat() {
+  PropertiesService.getScriptProperties().setProperty('TEST_FAIL_NEXT', 'proxy PUT /PurchaseOrders$|3');
+  console.log('Armed: the next 3 PO creations (one per company in the UAT run) fail and get provisional refs; processQueue converts them.');
 }
 
 function disarmForcedPOFailure() {
@@ -879,8 +885,16 @@ function poTimingReport(n) {
  * test supplier and drops it from the Suppliers list. Safe to run twice.
  */
 function cleanupTestPOs() {
-  const buyer = findUserByEmail_(TEST_BUYER.email);
-  const ent = TEST_BUYER.entity;
+  ENTITY_SEED.forEach(e => cleanupTestPOsFor_(e.entity_id));
+}
+function cleanupTestPOs_NHP() { cleanupTestPOsFor_('NHP'); }
+function cleanupTestPOs_HPB() { cleanupTestPOsFor_('HPB'); }
+function cleanupTestPOs_PK() { cleanupTestPOsFor_('PK'); }
+
+/** One company: POs by any UAT account (Setup.gs UAT_ACCOUNTS) or to a test supplier, their bills and slips. */
+function cleanupTestPOsFor_(entity) {
+  const ent = entityById_(entity).entity_id;
+  const testUserIds = UAT_ACCOUNTS.map(a => findUserByEmail_(a.email)).filter(Boolean).map(u => String(u.user_id));
   const t = entityById_(ent).xero_tenant_id;
   const ctx = { ref: 'cleanup:test-pos' };
   const isTestName = n => [TEST_SUPPLIER_NAME, TEST_SLIP_SUPPLIER_NAME].some(p => normName_(n).indexOf(normName_(p)) === 0);
@@ -890,7 +904,7 @@ function cleanupTestPOs() {
 
   invalidateTable_('POs');
   const targets = readTable('POs').rows.filter(r => r.entity_id === ent && r.status !== PO_STATUS.CANCELLED &&
-    ((buyer && String(r.buyer_user_id) === String(buyer.user_id)) || supplierIds.indexOf(r.contact_id) !== -1));
+    (testUserIds.indexOf(String(r.buyer_user_id)) !== -1 || supplierIds.indexOf(r.contact_id) !== -1));
   const report = [];
   invalidateTable_('Bills');
   const billsByPo = {};
@@ -959,7 +973,7 @@ function cleanupTestPOs() {
   invalidateTable_('Suppliers');
   if (supRows.length) invalidateRefCache(ent);
 
-  out_('cleanupTestPOs', table_(report, ['po', 'amount', 'was', 'bill', 'xero', 'row']) + '\n\nContacts: ' + (contacts.join('; ') || 'none') +
+  out_('cleanupTestPOs ' + ent, table_(report, ['po', 'amount', 'was', 'bill', 'xero', 'row']) + '\n\nContacts: ' + (contacts.join('; ') || 'none') +
     '\nQueue jobs removed for ' + poIds.length + ' PO(s); slips removed: ' + testBills.length + '; supplier history cleared; Suppliers rows removed: ' + supRows.length + '.');
 }
 
@@ -1202,6 +1216,9 @@ function checkBills(entity, days) {
 }
 
 function checkBills_NHP() { checkBills('NHP', 1); }
+function checkBills_HPB() { checkBills('HPB', 1); }
+function checkBills_PK() { checkBills('PK', 1); }
+function checkBills_all() { ENTITY_SEED.forEach(e => checkBills(e.entity_id, 1)); }
 
 /** One-shot: the next slip upload to a Xero PO fails, to show the bill finishing from the queue. */
 function armBillAttachFailure() {

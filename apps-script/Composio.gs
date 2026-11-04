@@ -213,16 +213,24 @@ function composioRequest_(path, body, label, ctx, classify) {
 }
 
 /**
- * One-shot test hook for the "Composio is down" acceptance test. Script Property TEST_FAIL_NEXT holds
- * a call label prefix (e.g. "proxy PUT /PurchaseOrders"); the next matching call fails every attempt
- * and the property is deleted, so the queue's retry afterwards goes through normally.
+ * Test hook for the "Composio is down" acceptance tests. Script Property TEST_FAIL_NEXT holds a call
+ * label prefix (e.g. "proxy PUT /PurchaseOrders"), optionally "$" for an exact label and "|n" for n
+ * calls; each matching call fails every attempt, then the property is deleted, so the queue's retry
+ * afterwards goes through normally.
  */
 function consumeForcedFailure_(label) {
   const props = PropertiesService.getScriptProperties();
-  const want = props.getProperty('TEST_FAIL_NEXT');
-  if (!want || String(label).indexOf(want) !== 0) return false;
-  props.deleteProperty('TEST_FAIL_NEXT');
-  console.warn('TEST_FAIL_NEXT: forcing failure of ' + label);
+  const raw = props.getProperty('TEST_FAIL_NEXT');
+  if (!raw) return false;
+  // "<label prefix>[$][|count]": "$" = this exact label only; count = how many calls to fail (default 1).
+  const m = /^(.*?)(\$)?(?:\|(\d+))?$/.exec(raw);
+  const want = m[1];
+  const hit = m[2] ? String(label) === want : String(label).indexOf(want) === 0;
+  if (!hit) return false;
+  const left = (Number(m[3]) || 1) - 1;
+  if (left > 0) props.setProperty('TEST_FAIL_NEXT', want + (m[2] || '') + '|' + left);
+  else props.deleteProperty('TEST_FAIL_NEXT');
+  console.warn('TEST_FAIL_NEXT: forcing failure of ' + label + (left ? ' (' + left + ' more to come)' : ''));
   return true;
 }
 

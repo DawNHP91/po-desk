@@ -75,7 +75,9 @@ export function render(root, ctx, params) {
       h('div', { class: `mt-2 rounded-2xl p-4 ring-1 ${tone}`, role: 'status' },
         h('p', { class: 'text-xl font-bold' }, title),
         h('p', { class: 'mt-1' }, sub),
-        approverNote ? h('p', { class: 'mt-2 font-medium' }, approverNote) : null),
+        approverNote ? h('p', { class: 'mt-2 font-medium' }, approverNote) : null,
+        po.decision ? h('p', { class: 'mt-2 font-medium' }, (po.status === 'DECLINED' ? 'Declined by ' : 'Approved by ') + (po.decision.self ? 'you (self-approved)' : po.decision.by) +
+          (po.decision.note ? `: “${po.decision.note}”` : '.')) : null),
       h('div', { class: 'mt-4 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200' },
         h('div', { class: 'flex items-center justify-between gap-3' },
           h('p', { class: 'text-sm font-medium text-slate-600' }, provisional ? 'Provisional reference' : 'PO number'),

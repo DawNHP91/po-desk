@@ -1,7 +1,7 @@
 {
   "name": "po-desk-frontend",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.7.0",
   "type": "module",
   "description": "PO Desk web app (static, built for Cloudflare Pages)",
   "scripts": {

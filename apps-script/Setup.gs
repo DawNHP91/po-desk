@@ -156,13 +156,33 @@ function seedPaymentMethods() {
 // --- Stage 2: nightly sync trigger ------------------------------------------------------------
 
 /** Installs exactly one daily syncAll trigger at 02:00 SAST. Safe to run twice: old ones are removed first. */
-function installSyncTrigger() {
-  const removed = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'syncAll');
-  removed.forEach(t => ScriptApp.deleteTrigger(t));
-  ScriptApp.newTrigger('syncAll').timeBased().atHour(2).everyDays(1).inTimezone(APP.TZ).create();
-  const now = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'syncAll').length;
-  console.log('installSyncTrigger: removed ' + removed.length + ', now ' + now + ' syncAll trigger(s), daily 02:00 ' + APP.TZ + '.');
+// --- Scheduled jobs (Stage 7) -------------------------------------------------------------------
+
+const TRIGGERS = Object.freeze([
+  { fn: 'nightlySync', what: 'Xero sync, daily 02:00', make: (b) => b.timeBased().atHour(2).everyDays(1).inTimezone(APP.TZ) },
+  { fn: 'processQueue', what: 'retry queue and approval reminders, every 5 minutes', make: (b) => b.timeBased().everyMinutes(5) },
+  { fn: 'dailyDigest', what: 'admin digest, daily 08:00', make: (b) => b.timeBased().atHour(8).everyDays(1).inTimezone(APP.TZ) },
+]);
+// Handlers earlier stages installed directly, replaced by the guarded ones above.
+const LEGACY_TRIGGER_FNS = Object.freeze(['syncAll']);
+
+/**
+ * Installs exactly one trigger per job, removing any copies first. Safe to run any number of times;
+ * the jobs themselves also cope with a duplicate trigger (nightlySync and dailyDigest run once a day,
+ * processQueue leases its work under the lock).
+ */
+function installTriggers() {
+  const names = TRIGGERS.map(t => t.fn).concat(LEGACY_TRIGGER_FNS);
+  const old = ScriptApp.getProjectTriggers().filter(t => names.indexOf(t.getHandlerFunction()) !== -1);
+  old.forEach(t => ScriptApp.deleteTrigger(t));
+  TRIGGERS.forEach(t => t.make(ScriptApp.newTrigger(t.fn)).create());
+  const now = ScriptApp.getProjectTriggers().map(t => t.getHandlerFunction());
+  console.log('installTriggers: removed ' + old.length + ' old trigger(s). Now:\n' +
+    TRIGGERS.map(t => '  ' + t.fn + ' x' + now.filter(n => n === t.fn).length + ' — ' + t.what).join('\n'));
 }
+
+/** Earlier stages' names, kept so old instructions still work. */
+function installSyncTrigger() { installTriggers(); }
 
 // --- Stage 2: proposed categories -------------------------------------------------------------
 // All three charts share one template (checked 3 Nov 2026), so one proposal fits all; codes are
@@ -337,10 +357,46 @@ function unlockAdmin() { unlockUser(ADMIN_SEED.email); }
 
 // --- Stage 4: retry queue trigger -------------------------------------------------------------
 
-/** Installs exactly one processQueue trigger, every 5 minutes. Safe to run twice. */
-function installQueueTrigger() {
-  const removed = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'processQueue');
-  removed.forEach(t => ScriptApp.deleteTrigger(t));
-  ScriptApp.newTrigger('processQueue').timeBased().everyMinutes(5).create();
-  console.log('installQueueTrigger: removed ' + removed.length + ', now 1 processQueue trigger every 5 minutes.');
+function installQueueTrigger() { installTriggers(); }
+
+// --- UAT test accounts (Stage 7) ------------------------------------------------------------------
+
+// Fake .test addresses (no email is ever sent to them). One buyer per company (limit R500) and one
+// approver for all three, so "over limit then approved" is decided by someone other than the buyer.
+const UAT_ACCOUNTS = Object.freeze([
+  { name: 'Test Buyer NHP', email: 'test.buyer@po-desk.test', role: 'buyer', grants: { NHP: [true, false, 500] } },
+  { name: 'Test Buyer HPB', email: 'test.buyer.hpb@po-desk.test', role: 'buyer', grants: { HPB: [true, false, 500] } },
+  { name: 'Test Buyer PK', email: 'test.buyer.pk@po-desk.test', role: 'buyer', grants: { PK: [true, false, 500] } },
+  { name: 'Test Approver', email: 'test.approver@po-desk.test', role: 'approver', grants: { HPB: [false, true, 0], NHP: [false, true, 0], PK: [false, true, 0] } },
+]);
+
+/**
+ * Creates (or re-activates) the UAT accounts with their grants and one shared PIN. Put the PIN in
+ * Script Property UAT_PIN first; it is deleted afterwards whether or not this worked.
+ */
+function createUatAccounts() {
+  const props = PropertiesService.getScriptProperties();
+  const pin = props.getProperty('UAT_PIN');
+  try {
+    if (!pin) throw new AppError('BAD_REQUEST', 'Add Script Property UAT_PIN (6 digits) first.');
+    const out = UAT_ACCOUNTS.map(a => {
+      const u = createUser(a.name, a.email, a.role);
+      updateRowById('Users', 'user_id', u.user_id, { active: true, role: a.role });
+      const grants = Object.keys(a.grants).map(ent => ent + ' ' + grantEntity_(u.user_id, ent, a.grants[ent][0], a.grants[ent][1], a.grants[ent][2], true));
+      setPin(a.email, pin);
+      return a.email + ': ' + grants.join(', ');
+    });
+    console.log('createUatAccounts:\n  ' + out.join('\n  '));
+  } finally {
+    props.deleteProperty('UAT_PIN');
+  }
+}
+
+/** Switches every UAT account off after testing; their open sessions end at once. Rows stay for the audit trail. */
+function deactivateUatAccounts() {
+  UAT_ACCOUNTS.forEach(a => {
+    const u = findUserByEmail_(a.email);
+    if (u) updateRowById('Users', 'user_id', u.user_id, { active: false, sessions_valid_from: new Date() });
+  });
+  console.log('deactivateUatAccounts: ' + UAT_ACCOUNTS.map(a => a.email).join(', ') + ' are off.');
 }

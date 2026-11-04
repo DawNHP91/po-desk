@@ -27,6 +27,15 @@ const ROUTES = {
   getSlip: { tabs: AUTH_TABS.concat(['POs', 'Bills']), fn: (req, ctx) => actionGetSlip_(req, ctx) },
   saveSlipReview: { tabs: AUTH_TABS.concat(['POs', 'Bills']), fn: (req, ctx) => actionSaveSlipReview_(req, ctx) },
   submitBill: { tabs: AUTH_TABS.concat(['POs', 'Bills', 'Queue']), fn: (req, ctx) => actionSubmitBill_(req, ctx) },
+  // Stage 7: approvals, people admin and the emailed Set PIN link.
+  listApprovals: { tabs: AUTH_TABS.concat(['POs', 'PaymentMethods', 'Bills']), fn: (req, ctx) => actionListApprovals_(req, ctx) },
+  decidePO: { tabs: AUTH_TABS.concat(['POs']), fn: (req, ctx) => actionDecidePO_(req, ctx) },
+  listPeople: { tabs: AUTH_TABS, fn: (req, ctx) => actionListPeople_(req, ctx) },
+  savePerson: { tabs: AUTH_TABS, fn: (req, ctx) => actionSavePerson_(req, ctx) },
+  resetPin: { tabs: AUTH_TABS, fn: (req, ctx) => actionResetPin_(req, ctx) },
+  setPersonActive: { tabs: AUTH_TABS, fn: (req, ctx) => actionSetPersonActive_(req, ctx) },
+  checkPinToken: { public: true, tabs: AUTH_TABS, fn: (req) => actionCheckPinToken_(req) },
+  setPinWithToken: { public: true, tabs: AUTH_TABS, fn: (req) => actionSetPinWithToken_(req) },
 };
 
 const PO_STATUS = Object.freeze({
@@ -415,6 +424,18 @@ function poView_(row, data, pm, bill) {
     paidWith: pm ? (pm.type === 'CARD' && pm.last4 ? pm.label + ' ••' + pm.last4 : String(pm.label)) : '',
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
     slip: bill ? Object.assign({ billId: bill.bill_id, reviewed: Number(bill.total_incl_zar) > 0, billed: !!bill.xero_invoice_id }, billView_(bill)) : null,
+    decision: row.decided_at ? decisionView_(row) : null,
+  };
+}
+
+/** Who approved or declined the PO, when, and their note (Stage 7). */
+function decisionView_(row) {
+  const by = row.approver_user_id ? findBy('Users', 'user_id', row.approver_user_id)[0] : null;
+  return {
+    by: by ? String(by.name) : '',
+    at: row.decided_at instanceof Date ? row.decided_at.toISOString() : String(row.decided_at),
+    note: String(row.decision_note || ''),
+    self: !!by && String(row.approver_user_id) === String(row.buyer_user_id),
   };
 }
 

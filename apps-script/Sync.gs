@@ -13,7 +13,41 @@ const REF_CACHE_TTL_S = 21600;                 // CacheService maximum (6 h); mi
 const CACHE_CHUNK_CHARS = 30000;               // ≤ 90 KB even if every char took 3 bytes in UTF-8.
 const CACHE_CHUNK_THRESHOLD_BYTES = 90 * 1024;
 
+/** Trigger handler (02:00 daily). A second trigger, or a second run the same day, does nothing. */
+function nightlySync() {
+  if (!claimDailyRun_('sync')) { console.log('nightlySync: already ran today.'); return 'already ran today'; }
+  return syncAll();
+}
+
+/**
+ * Fetches every company from Xero and rewrites the cached tabs. Run from the editor any time; two
+ * runs never overlap (a second one started meanwhile just stops), because both would rewrite the
+ * same rows.
+ */
 function syncAll() {
+  if (!claimRunning_('syncAll', 10 * 60)) { console.log('syncAll: another sync is running; this one stops.'); return 'another sync is running'; }
+  try {
+    return syncAllNow_();
+  } finally {
+    CacheService.getScriptCache().remove('running:syncAll');
+  }
+}
+
+/** Marks a long job as running (under the lock), so an overlapping start can step aside. */
+function claimRunning_(name, ttlS) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) return false;
+  try {
+    const cache = CacheService.getScriptCache();
+    if (cache.get('running:' + name)) return false;
+    cache.put('running:' + name, String(Date.now()), ttlS);
+    return true;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function syncAllNow_() {
   const started = Date.now();
   const deadline = started + SYNC_TIME_BUDGET_MS;
   const callsBefore = composioStats_.calls;
@@ -316,7 +350,23 @@ const QUEUE_RULES = Object.freeze({
   MAX_WAIT_MIN: 60,
 });
 
+/**
+ * Trigger handler, every 5 minutes: retries queued Xero work, then sends approval reminders that are
+ * due. Both are safe with two triggers installed: queue jobs are leased under the lock, and a
+ * reminder is marked sent under the lock before it goes out.
+ */
 function processQueue() {
+  const summary = processQueueJobs_();
+  try {
+    const reminded = sendApprovalReminders_();
+    if (reminded.length) console.log('Approval reminders: ' + reminded.join('; '));
+  } catch (err) {
+    console.error('Approval reminders failed: ' + err.message);
+  }
+  return summary;
+}
+
+function processQueueJobs_() {
   const started = Date.now();
   const lock = LockService.getScriptLock();
 

@@ -11,6 +11,9 @@ import * as myPosView from './views/mypos.js';
 import * as slipsView from './views/slips.js';
 import * as slipView from './views/slip.js';
 import * as reviewView from './views/review.js';
+import * as approvalsView from './views/approvals.js';
+import * as peopleView from './views/people.js';
+import * as setPinView from './views/setpin.js';
 
 // company: the screen works inside the chosen company, so it shows the "Buying for" bar and
 // sends the user to the picker first if no company is chosen yet.
@@ -24,6 +27,11 @@ const ROUTES = [
   { re: /^\/slips$/, view: slipsView, signedIn: true, company: true },
   { re: /^\/po\/([0-9a-f-]{36})\/slip$/, view: slipView, signedIn: true, company: true },
   { re: /^\/slip\/([0-9a-f-]{36})$/, view: reviewView, signedIn: true, company: true },
+  // Approvals and People span every company, so no "Buying for" bar.
+  { re: /^\/approvals(?:\/([0-9a-f-]{36}))?$/, view: approvalsView, signedIn: true },
+  { re: /^\/people(?:\/(new|[0-9a-f-]{36}))?$/, view: peopleView, signedIn: true },
+  // Opened from the emailed link, signed in or not: the token is the only credential.
+  { re: /^\/set-pin(?:\?(.*))?$/, view: setPinView, any: true },
 ];
 
 const app = document.getElementById('app');
@@ -51,9 +59,9 @@ function render() {
   if (!found) { location.replace('#' + (auth.isSignedIn() ? landing() : '/login')); return; }
   const { route, params } = found;
 
-  if (restoreState === 'offline' && !auth.isSignedIn()) return renderOffline();
-  if (route.signedIn && !auth.isSignedIn()) return go('/login');
-  if (!route.signedIn && auth.isSignedIn()) return go(landing());
+  if (restoreState === 'offline' && !auth.isSignedIn() && !route.any) return renderOffline();
+  if (!route.any && route.signedIn && !auth.isSignedIn()) return go('/login');
+  if (!route.any && !route.signedIn && auth.isSignedIn()) return go(landing());
   if (route.company && auth.needsCompanyChoice()) return go('/companies');
   if (route.company && !route.optional && !auth.selectedCompany()) return go('/home');
   if (path === '/companies' && auth.buyCompanies().length <= 1) return go('/home');

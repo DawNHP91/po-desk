@@ -65,6 +65,7 @@ export function clear() {
 export const isSignedIn = () => !!me;
 export const getMe = () => me;
 export const rememberedEmail = () => local.get(EMAIL_KEY) || '';
+export const rememberEmail = (email) => local.set(EMAIL_KEY, String(email || '').trim());
 export const buyCompanies = () => (me ? me.companies.filter((c) => c.canBuy) : []);
 
 export function selectedCompany() {

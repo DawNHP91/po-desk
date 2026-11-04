@@ -62,6 +62,14 @@ function xeroProxyCall_(tenantId, method, path, opts) {
   return { method: method, endpoint: XERO_API + path, opts: opts, entityId: g.entityId };
 }
 
+/** Runs one prepared call (e.g. xeroPoUpdateCall_) on its own, with retries. Throws on failure or Xero validation errors. */
+function xeroRunCall_(call, ctx) {
+  const res = composioProxy(call.method, call.endpoint, call.opts, Object.assign({}, ctx || {}, { entityId: call.entityId }));
+  const errs = xeroValidationMessages_(res.data);
+  if (errs.length) throw new AppError('XERO_VALIDATION', errs.join('; '), { upstream: 400 });
+  return res;
+}
+
 /** Runs tenant-checked calls in parallel; returns per-call results instead of throwing (Composio.gs). */
 function xeroProxyAll_(calls, ctx) {
   return composioProxyAll(calls, ctx);
