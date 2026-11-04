@@ -710,16 +710,46 @@ function duplicateSlip_(po, f, billId) {
 const GENERIC_NAME_WORDS = Object.freeze(['pty', 'ltd', 'cc', 'inc', 'the', 'and', 'limited', 'company', 'trading', 'group', 'store', 'stores', 'shop',
   'motors', 'services', 'supplies', 'supply', 'market', 'supermarket', 'hardware', 'pharmacy', 'garage', 'station', 'centre', 'center', 'sa', 'south', 'africa']);
 
-/** Loose supplier-name match: "SPAR KLEIN KAROO" matches "Spar Oudtshoorn"; "Engen" does not match "Shell". */
-function namesMatch_(a, b) {
+/**
+ * Loose supplier-name match: "SPAR KLEIN KAROO" matches "Spar Oudtshoorn"; "Engen" does not match "Shell".
+ * With fuzzy (the default) small differences pass too, as slips and slip reading misspell names:
+ * "R & R PETROLIUM" ~ "R & R Petroleum", "PICKNPAY" ~ "Pick n Pay". Words under 5 letters must match exactly.
+ * The slip test scores with fuzzy off, so a misread name is not counted as right.
+ */
+function namesMatch_(a, b, fuzzy) {
   const norm = (s) => String(s || '').toLowerCase().replace(/\(pty\)/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
   const na = norm(a);
   const nb = norm(b);
   if (!na || !nb) return false;
   if (na === nb || na.indexOf(nb) !== -1 || nb.indexOf(na) !== -1) return true;
   const words = (s) => s.split(' ').filter(w => w.length >= 3 && GENERIC_NAME_WORDS.indexOf(w) === -1);
+  const wa = words(na);
   const wb = words(nb);
-  return words(na).some(w => wb.indexOf(w) !== -1);
+  if (wa.some(w => wb.indexOf(w) !== -1)) return true;
+  if (fuzzy === false) return false;
+  const ca = na.replace(/ /g, '');
+  const cb = nb.replace(/ /g, '');
+  if (Math.min(ca.length, cb.length) >= 4 && (ca.indexOf(cb) !== -1 || cb.indexOf(ca) !== -1)) return true;
+  return nearlySame_(ca, cb) || wa.some(x => wb.some(y => nearlySame_(x, y)));
+}
+
+/** True when two words differ by at most 1 letter (5–9 letters) or 2 letters (10 or more). */
+function nearlySame_(x, y) {
+  const len = Math.min(x.length, y.length);
+  const allowed = len < 5 ? 0 : len < 10 ? 1 : 2;
+  if (!allowed || Math.abs(x.length - y.length) > allowed) return false;
+  let prev = Array.from({ length: y.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= x.length; i++) {
+    const cur = [i];
+    let best = i;
+    for (let j = 1; j <= y.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (x[i - 1] === y[j - 1] ? 0 : 1));
+      if (cur[j] < best) best = cur[j];
+    }
+    if (best > allowed) return false;
+    prev = cur;
+  }
+  return prev[y.length] <= allowed;
 }
 
 function parseJson_(s) {

@@ -1086,7 +1086,7 @@ function scoreSlipTest() {
   const isoOf = (t) => { const m = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/.exec(t); if (m) { const y = m[3].length === 2 ? '20' + m[3] : m[3]; return y + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0'); } return t.slice(0, 10); };
   const none = (t) => /^(none|-|n\/a|na)$/i.test(t);
   const FIELDS = {
-    supplier: (x, t) => namesMatch_(x, t),
+    supplier: (x, t) => namesMatch_(x, t, false),
     date: (x, t) => x === isoOf(t),
     total: (x, t) => x !== '' && Math.abs(parseAmount_(x) - parseAmount_(t)) < 0.005,
     vat: (x, t) => (none(t) ? x === '' : x !== '' && Math.abs(parseAmount_(x) - parseAmount_(t)) < 0.005),

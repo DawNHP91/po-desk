@@ -20,7 +20,7 @@ The same Composio connection also reaches Nandrea Health Products (tenant e775d9
 - Database: Google Sheet "PO Desk DB"; each tab is a table (see Data model).
 - Files: Google Drive folder "PO Desk" via DriveApp.
 - Xero: only through Composio's REST API, called from Apps Script with UrlFetchApp.
-- Slip reading: Gemini API free tier via UrlFetchApp; model name lives in Config.
+- Slip reading: Gemini API free tier via UrlFetchApp; model name lives in Config. Decided 4 Nov 2026: the free tier's data-use terms (Google may use what is sent, including slip images, to improve its products) are accepted.
 - Email: MailApp for approvals and notifications.
 - Never call Composio or Gemini from the browser. No Supabase, no Cloudflare Workers, no paid services.
 

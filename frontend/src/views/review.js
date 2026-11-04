@@ -6,14 +6,37 @@ import { call } from '../api.js';
 // Same wording and rules as Main.gs slipFlags_ so the notes match what is stored with the bill.
 const GENERIC = ['pty', 'ltd', 'cc', 'inc', 'the', 'and', 'limited', 'company', 'trading', 'group', 'store', 'stores', 'shop', 'motors', 'services',
   'supplies', 'supply', 'market', 'supermarket', 'hardware', 'pharmacy', 'garage', 'station', 'centre', 'center', 'sa', 'south', 'africa'];
+// Same rules as namesMatch_ in Main.gs (fuzzy on): keep the two in step.
 function namesMatch(a, b) {
   const norm = (s) => String(s || '').toLowerCase().replace(/\(pty\)/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
   const na = norm(a); const nb = norm(b);
   if (!na || !nb) return false;
   if (na === nb || na.includes(nb) || nb.includes(na)) return true;
   const words = (s) => s.split(' ').filter((w) => w.length >= 3 && !GENERIC.includes(w));
-  const wb = words(nb);
-  return words(na).some((w) => wb.includes(w));
+  const wa = words(na); const wb = words(nb);
+  if (wa.some((w) => wb.includes(w))) return true;
+  const ca = na.replace(/ /g, ''); const cb = nb.replace(/ /g, '');
+  if (Math.min(ca.length, cb.length) >= 4 && (ca.includes(cb) || cb.includes(ca))) return true;
+  return nearlySame(ca, cb) || wa.some((x) => wb.some((y) => nearlySame(x, y)));
+}
+
+// At most 1 letter different (5–9 letters) or 2 (10 or more); shorter words must match exactly.
+function nearlySame(x, y) {
+  const len = Math.min(x.length, y.length);
+  const allowed = len < 5 ? 0 : len < 10 ? 1 : 2;
+  if (!allowed || Math.abs(x.length - y.length) > allowed) return false;
+  let prev = Array.from({ length: y.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= x.length; i++) {
+    const cur = [i];
+    let best = i;
+    for (let j = 1; j <= y.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (x[i - 1] === y[j - 1] ? 0 : 1));
+      if (cur[j] < best) best = cur[j];
+    }
+    if (best > allowed) return false;
+    prev = cur;
+  }
+  return prev[y.length] <= allowed;
 }
 
 function liveFlags(po, f, t) {
