@@ -409,3 +409,39 @@ function grantPermissions() {
   ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
   console.log('All permissions granted. Emails left today: ' + MailApp.getRemainingDailyQuota() + '. Now run checkEmail.');
 }
+
+/**
+ * A PO (and its bill) deleted directly in Xero: PO Desk doesn't read PO statuses back from Xero, so
+ * its record would still say Issued or Billed. Put "<company> <PO number>" (e.g. "NHP PO-0184") in
+ * Script Property CANCEL_PO and run this: it checks Xero really has the PO and its bills deleted,
+ * then marks the PO Desk record CANCELLED. The property is deleted afterwards.
+ */
+function cancelPoDeletedInXero() {
+  const props = PropertiesService.getScriptProperties();
+  const raw = String(props.getProperty('CANCEL_PO') || '').trim();
+  try {
+    const m = /^(HPB|NHP|PK)\s+(\S+)$/i.exec(raw);
+    if (!m) throw new AppError('BAD_REQUEST', 'Set Script Property CANCEL_PO to e.g. "NHP PO-0184" first.');
+    const ent = m[1].toUpperCase();
+    invalidateTable_('POs');
+    invalidateTable_('Bills');
+    const row = readTable('POs').rows.find(r => r.entity_id === ent && String(r.po_number) === m[2]);
+    if (!row) throw new AppError('NOT_FOUND', 'No ' + ent + ' PO ' + m[2] + ' in PO Desk.');
+    const t = entityById_(ent).xero_tenant_id;
+    const ctx = { ref: 'cancel:' + row.po_id };
+    const gone = (s) => s === 'DELETED' || s === 'VOIDED';
+    const x = row.xero_po_id ? (xeroGetPurchaseOrder(t, String(row.xero_po_id), ctx) || {}) : {};
+    if (row.xero_po_id && !gone(x.Status)) throw new AppError('BAD_REQUEST', m[2] + ' is still ' + x.Status + ' in Xero. Delete it there first (or use the app).');
+    const bills = readTable('Bills').rows.filter(b => b.po_id === row.po_id && b.xero_invoice_id);
+    bills.forEach(b => {
+      const inv = xeroGetInvoiceById(t, String(b.xero_invoice_id), ctx) || {};
+      if (!gone(inv.Status)) throw new AppError('BAD_REQUEST', 'Its bill ' + (inv.InvoiceNumber || '') + ' is still ' + inv.Status + ' in Xero. Delete it there first.');
+    });
+    const was = row.status;
+    updateRowById('POs', 'po_id', row.po_id, { status: PO_STATUS.CANCELLED });
+    auditLog({ entityId: ent, action: 'po.cancel_deleted_in_xero', ok: true, ref: row.po_id, detail: { po: m[2], was: was, bills: bills.length } });
+    console.log(ent + ' ' + m[2] + ': ' + was + ' -> CANCELLED (Xero: PO ' + (x.Status || 'none') + ', ' + bills.length + ' bill(s) deleted).');
+  } finally {
+    props.deleteProperty('CANCEL_PO');
+  }
+}

@@ -300,9 +300,11 @@ function digest_(now) {
     const open = pos.filter(r => r.status === PO_STATUS.ISSUED && !sent[r.po_id] && (now - new Date(r.created_at)) > openDays * 86400000);
     const pending = pos.filter(r => r.status === PO_STATUS.PENDING_XERO);
     const awaiting = pos.filter(r => r.status === PO_STATUS.AWAITING_APPROVAL);
-    const flagged = bills.filter(b => b.entity_id === ent && b.status && b.flags && b.flags !== '[]' &&
+    // A PO cancelled since (e.g. deleted in Xero and marked with cancelPoDeletedInXero) is no longer news.
+    const live = (b) => byId[b.po_id] && byId[b.po_id].status !== PO_STATUS.CANCELLED;
+    const flagged = bills.filter(b => b.entity_id === ent && live(b) && b.status && b.flags && b.flags !== '[]' &&
       ymd(new Date((parseJson_(b.steps_json) || {}).startedAt || b.created_at)) === yesterday);
-    const unfinished = bills.filter(b => b.entity_id === ent && (b.status === BILL_STATUS.QUEUED || b.status === BILL_STATUS.POSTING));
+    const unfinished = bills.filter(b => b.entity_id === ent && live(b) && (b.status === BILL_STATUS.QUEUED || b.status === BILL_STATUS.POSTING));
     counts[ent] = { issued: issued.length, open: open.length, pending: pending.length, flagged: flagged.length, unfinished: unfinished.length, awaiting: awaiting.length };
 
     const out = ['== ' + e.short_name + ' =='];
