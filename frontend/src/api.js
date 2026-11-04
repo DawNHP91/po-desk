@@ -54,6 +54,9 @@ export async function call(action, payload = {}, { idemKey = '', timeoutMs = 250
       clearTimeout(timer);
     }
     if (!env || typeof env.ok !== 'boolean') throw new ApiError('BAD_RESPONSE', 'PO Desk sent an unexpected answer. Please try again.');
+    // Every action answers { ok: true, data }. A bare { ok: true } is the GET health check, which Google's
+    // redirect has (rarely) served for a POST: never treat that as the action having worked.
+    if (env.ok && !('data' in env)) throw new ApiError('BAD_RESPONSE', 'PO Desk sent an unexpected answer. Please try again.');
     if (!env.ok) {
       const code = (env.error && env.error.code) || 'ERROR';
       const err = new ApiError(code, (env.error && env.error.message) || 'Something went wrong. Please try again.');
