@@ -41,17 +41,27 @@ The only frontend setting is `frontend/src/config.js` (`API_URL`, `APP_VERSION`)
 
 ```sh
 clasp push                                   # upload apps-script/ to the project
-clasp update-deployment <DEPLOYMENT_ID>      # publish it to the URL in frontend/src/config.js
+clasp update-deployment AKfycbzA66-ZRoT7nxh0_hg0yVUqWAv080DYa_PbDhNerKUx0o6RvOP_0CTvUZmWrtMyLEaA   # publish it (same URL)
 ```
+
+A push alone does not change the live web app; `update-deployment` publishes the pushed code as a
+new version behind the same URL. If a change adds an OAuth scope, run any function in the editor
+and approve it first, or the live app will fail to authorise.
 
 Secrets live only in Script Properties (Project Settings → Script Properties): `COMPOSIO_API_KEY`,
 `COMPOSIO_XERO_ACCOUNT_ID`, `COMPOSIO_USER_ID`, `GEMINI_API_KEY`; `SHEET_ID` and `DRIVE_ROOT_ID` are
 written by the setup functions.
 
 One-off setup, run from the Apps Script editor in this order: `setupSheets`, `setupDrive`,
-`listTenants`, `installSyncTrigger`, `syncAll`, `proposeCategories`, `seedAdmin`, then `setMyPin`
-(add Script Properties `SETPIN_EMAIL` and `SETPIN_PIN` first; the function deletes both).
-Every setup function is safe to run twice.
+`listTenants`, `installSyncTrigger`, `installQueueTrigger`, `syncAll`, `proposeCategories`,
+`seedAdmin`, then `setMyPin` (add Script Properties `SETPIN_EMAIL` and `SETPIN_PIN` first; the
+function deletes both). Every setup function is safe to run twice.
+
+Triggers: `syncAll` daily at 02:00 SAST; `processQueue` every 5 minutes (turns provisional POs into
+real Xero POs when Xero is back).
 
 Tests (editor, results in the execution log): `testTenantGuard`, `testCoding`, `testSyncGuards`,
-`testCodingLive`, `testAccessControl`, `testLockout` (the last two need `createTestBuyerNHP` first).
+`testCodingLive`, `testFastSheets`, `testAccessControl`, `testLockout` (the last two need
+`createTestBuyerNHP` first). PO acceptance helpers: `armForcedPOFailure` (next PO acts as if
+Composio is down), `poTimingReport` (median/worst server time per step), `cleanupTestPOs` (deletes
+test POs in Xero and archives "PO Desk Test Supplier …" contacts).

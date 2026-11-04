@@ -42,6 +42,8 @@ COMPOSIO_API_KEY, COMPOSIO_XERO_ACCOUNT_ID, COMPOSIO_USER_ID (if the API needs i
   (a) The create tools for POs and invoices do not expose LineAmountTypes. Till slips are VAT-inclusive, so set Inclusive with the update tools straight after creation, unless the create tools are shown to accept it.
   (b) XERO_UPLOAD_ATTACHMENT takes a Composio file reference (s3key), not raw bytes. Find the supported route from Apps Script: Composio's file-upload endpoint, or its proxy-execute endpoint calling Xero's Attachments API directly.
   (c) The PO number is PurchaseOrderNumber in the create response; Xero assigns it from each org's own PO numbering settings. Parse responses defensively (e.g. data.PurchaseOrders[0]).
+- Resolved (Stage 1 and 4): the create tools silently drop LineAmountTypes and AttentionTo, so POs are created in ONE call through the proxy (PUT /PurchaseOrders) with Inclusive, AttentionTo and the final status together; the update tool is only a backstop. Attachments and History notes also go through the proxy.
+- Verified 4 Nov 2026: Xero's API cannot edit archived contacts, including un-archiving them ("Archived contacts cannot currently be edited via the API"), and refuses a second contact with the same name. A buyer asking for an archived supplier is told to have it restored in Xero.
 - Retry 429 and 5xx with exponential backoff, max 3 attempts. Log every call (tool, entity, ms, ok) to AuditLog.
 - Budget: Composio's free tier is about 20,000 tool calls a month (check the dashboard). One purchase uses roughly 5 to 8 calls; the nightly sync about 15. Keep calls off the hot path wherever a cache will do.
 
@@ -62,6 +64,7 @@ COMPOSIO_API_KEY, COMPOSIO_XERO_ACCOUNT_ID, COMPOSIO_USER_ID (if the API needs i
 - AuditLog(ts, user_id, entity_id, action, ref, ok, detail_json)
 PO status values: ISSUED, AWAITING_APPROVAL, DECLINED, PENDING_XERO, BILLED, CANCELLED.
 Read each tab once per request with getDataRange().getValues(); write whole rows with setValues; wrap PO creation in LockService.getScriptLock().
+Exception for speed (Stage 4): web app requests read all their tabs in one Sheets API batchGet and createPO writes its rows in parallel (Db.gs fast path; testFastSheets proves it matches SpreadsheetApp cell for cell). Any Sheets API failure falls back to SpreadsheetApp.
 
 ## Seed data: payment methods
 Setup.gs seedPaymentMethods() writes these rows and is safe to run twice. Each card is a cheque (debit) card, so it clears straight to that company's cheque bank account in Xero.
