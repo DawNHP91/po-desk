@@ -1,5 +1,4 @@
-// Home: the main actions for the chosen company. New PO, Add slip, My POs and Approvals are
-// built in later stages; their tiles are here so the layout and permissions can be checked now.
+// Home: the main actions for the chosen company. Add slip and Approvals arrive in later stages.
 import { h, icon, alertBox } from './ui.js';
 
 const ICONS = {
@@ -36,9 +35,9 @@ export function render(root, ctx) {
   const tiles = [];
   if (company) {
     tiles.push(
-      tile('New PO', 'Get a PO number', ICONS.newPo, soon('New PO')),
+      tile('New PO', 'Get a PO number', ICONS.newPo, () => ctx.go('/po/new')),
       tile('Add slip', 'Photograph a till slip', ICONS.slip, soon('Add slip')),
-      tile('My POs', 'Numbers and status', ICONS.list, soon('My POs')),
+      tile('My POs', 'Numbers and status', ICONS.list, () => ctx.go('/pos')),
     );
   }
   if (me.canApproveAny) tiles.push(tile('Approvals', 'POs over a limit', ICONS.approve, soon('Approvals')));

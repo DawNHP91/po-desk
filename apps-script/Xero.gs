@@ -193,7 +193,8 @@ function xeroFindContactsByName(tenantId, name, ctx) {
   if (!safe) throw new AppError('BAD_REQUEST', 'A supplier name is required.');
   const path = '/Contacts?includeArchived=true&where=' + encodeURIComponent('Name=="' + safe + '"');
   const res = xeroProxy_(tenantId, 'GET', path, {}, ctx);
-  return xeroList_(res.data || {}, 'Contacts');
+  // Re-check the name here too: callers archive what this returns, so never rely on the filter alone.
+  return xeroList_(res.data || {}, 'Contacts').filter(c => normName_(c.Name) === normName_(safe));
 }
 
 /** XERO_UPDATE_CONTACT has no ContactStatus field, so archiving goes straight to Xero via the proxy. */
@@ -298,4 +299,61 @@ function xeroAddHistoryNote(tenantId, entityType, entityId, details, ctx) {
     body: { HistoryRecords: [{ Details: truncate_(details, 450) }] },
   }, ctx);
   return xeroFirst_(res.data || {}, 'HistoryRecords', 'Details');
+}
+
+// --- Stage 4: one-call PO creation and tenant-safe lookups (proxy) ---------------------------
+
+/**
+ * Creates a PO with VAT-inclusive amounts, AttentionTo and its final status in ONE call.
+ * The create tool silently drops LineAmountTypes and AttentionTo (Stage 1), so the tool route needs a
+ * second update call — 1.2 s more on the buyer's wait, and a window where an AUTHORISED PO sits in
+ * Xero with exclusive amounts. Xero's own API takes everything at once through the proxy.
+ * po: { ContactID, Date, DeliveryDate, Reference, AttentionTo, Status, LineItems[] }. Returns the PO.
+ */
+function xeroCreatePurchaseOrderInclusive(tenantId, po, ctx) {
+  assertUuid_(po && po.ContactID, 'ContactID');
+  if (['DRAFT', 'SUBMITTED', 'AUTHORISED'].indexOf(po.Status) === -1) throw new AppError('BAD_REQUEST', 'Unsupported PO status ' + po.Status + '.');
+  const body = {
+    PurchaseOrders: [{
+      Contact: { ContactID: po.ContactID },
+      Date: po.Date,
+      DeliveryDate: po.DeliveryDate || po.Date,
+      Reference: po.Reference,
+      AttentionTo: po.AttentionTo,
+      Status: po.Status,
+      LineAmountTypes: 'Inclusive',
+      LineItems: po.LineItems,
+    }],
+  };
+  const res = xeroProxy_(tenantId, 'PUT', '/PurchaseOrders', { body: body }, ctx);
+  const errs = xeroValidationMessages_(res.data);
+  const created = xeroFirst_(res.data || {}, 'PurchaseOrders', 'PurchaseOrderID');
+  if (errs.length || !created || !created.PurchaseOrderID || !created.PurchaseOrderNumber) {
+    throw new AppError('XERO_VALIDATION', errs.join('; ') || 'Xero did not return a PO number.', { upstream: 400 });
+  }
+  // Backstop: if Xero ever ignores Inclusive, fix it before the number reaches the buyer.
+  if (created.LineAmountTypes !== 'Inclusive') {
+    const li = (created.LineItems || [])[0] || {};
+    const fixed = xeroUpdatePurchaseOrder(tenantId, created.PurchaseOrderID, {
+      LineAmountTypes: 'Inclusive',
+      LineItems: [Object.assign({ LineItemID: li.LineItemID }, po.LineItems[0])],
+    }, ctx);
+    return Object.assign({}, created, fixed || {}, { PurchaseOrderNumber: created.PurchaseOrderNumber });
+  }
+  return created;
+}
+
+/** POs dated between two YYYY-MM-DD dates, via the proxy (XERO_LIST_PURCHASE_ORDERS is not yet proven per tenant). */
+function xeroListPurchaseOrdersByDate(tenantId, dateFrom, dateTo, ctx) {
+  const path = '/PurchaseOrders?DateFrom=' + encodeURIComponent(dateFrom) + '&DateTo=' + encodeURIComponent(dateTo || dateFrom);
+  const res = xeroProxy_(tenantId, 'GET', path, {}, ctx);
+  return xeroList_(res.data || {}, 'PurchaseOrders');
+}
+
+/** Case-insensitive search over names (and other contact fields), archived contacts included. */
+function xeroSearchContacts(tenantId, term, ctx) {
+  const q = String(term || '').trim();
+  if (!q) return [];
+  const res = xeroProxy_(tenantId, 'GET', '/Contacts?includeArchived=true&page=1&pageSize=100&searchTerm=' + encodeURIComponent(q), {}, ctx);
+  return xeroList_(res.data || {}, 'Contacts');
 }

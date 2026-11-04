@@ -331,3 +331,13 @@ function unlockUser(email) {
 
 function unlockTestBuyer() { unlockUser(TEST_BUYER.email); }
 function unlockAdmin() { unlockUser(ADMIN_SEED.email); }
+
+// --- Stage 4: retry queue trigger -------------------------------------------------------------
+
+/** Installs exactly one processQueue trigger, every 5 minutes. Safe to run twice. */
+function installQueueTrigger() {
+  const removed = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'processQueue');
+  removed.forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('processQueue').timeBased().everyMinutes(5).create();
+  console.log('installQueueTrigger: removed ' + removed.length + ', now 1 processQueue trigger every 5 minutes.');
+}

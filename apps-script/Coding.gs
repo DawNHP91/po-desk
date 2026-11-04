@@ -79,6 +79,7 @@ function codingData_(ent) {
   return {
     accounts: ref.accounts,
     taxRates: ref.taxRates,
+    suppliers: ref.suppliers,
     categories: readTable('Categories').rows.filter(r => r.entity_id === ent),
     history: readTable('SupplierHistory').rows.filter(r => r.entity_id === ent),
     config: {

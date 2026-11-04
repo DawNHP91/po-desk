@@ -62,7 +62,7 @@ function composioProxy(method, endpoint, opts, ctx) {
     const upstream = json && typeof json.status === 'number' ? json.status : 0;
     if (status === 200 && upstream >= 200 && upstream < 300) return { ok: true };
     const msg = errorText_(json) || ('HTTP ' + status + (upstream ? ' / upstream ' + upstream : ''));
-    return { ok: false, retryable: isRetryableStatus_(status) || isRetryableStatus_(upstream), message: msg };
+    return { ok: false, retryable: isRetryableStatus_(status) || isRetryableStatus_(upstream), message: msg, upstream: upstream };
   });
   return { status: res.json.status, data: res.json.data, headers: res.json.headers || {} };
 }
@@ -103,12 +103,19 @@ function composioRequest_(path, body, label, ctx, classify) {
   ctx = ctx || {};
   const apiKey = getSecret_('COMPOSIO_API_KEY');
   const t0 = Date.now();
+  const forced = consumeForcedFailure_(label);
   let attempt = 0;
   let last = { status: 0, json: null, verdict: { ok: false, message: 'not attempted' } };
 
   while (attempt < COMPOSIO_MAX_ATTEMPTS) {
     attempt++;
     composioStats_.calls++;
+    if (forced) {
+      // Test hook: behaves like Composio being unreachable on every attempt, retries and backoff included.
+      last = { status: 0, json: null, verdict: { ok: false, retryable: true, message: 'Forced failure for testing (Script Property TEST_FAIL_NEXT)' } };
+      if (attempt < COMPOSIO_MAX_ATTEMPTS) { backoff_(attempt, null); continue; }
+      break;
+    }
     let resp;
     try {
       resp = UrlFetchApp.fetch(COMPOSIO_BASE_URL + path, {
@@ -136,13 +143,27 @@ function composioRequest_(path, body, label, ctx, classify) {
   const ms = Date.now() - t0;
   auditLog({
     userId: ctx.userId, entityId: ctx.entityId, action: 'composio.' + label, ref: ctx.ref, ok: last.verdict.ok,
-    detail: { ms: ms, attempts: attempt, status: last.status, error: last.verdict.ok ? undefined : truncate_(last.verdict.message, 500), log_id: last.json && last.json.log_id },
+    detail: { ms: ms, attempts: attempt, status: last.status, upstream: last.verdict.upstream || undefined, forced: forced || undefined, error: last.verdict.ok ? undefined : truncate_(last.verdict.message, 500), log_id: last.json && last.json.log_id },
   });
 
   if (!last.verdict.ok) {
-    throw new AppError(last.status === 0 ? 'COMPOSIO_UNREACHABLE' : 'XERO_FAILED', truncate_(last.verdict.message, 300), { status: last.status, attempts: attempt, ms: ms });
+    throw new AppError(last.status === 0 ? 'COMPOSIO_UNREACHABLE' : 'XERO_FAILED', truncate_(last.verdict.message, 300), { status: last.status, upstream: last.verdict.upstream || 0, attempts: attempt, ms: ms });
   }
   return { status: last.status, json: last.json, ms: ms, attempts: attempt };
+}
+
+/**
+ * One-shot test hook for the "Composio is down" acceptance test. Script Property TEST_FAIL_NEXT holds
+ * a call label prefix (e.g. "proxy PUT /PurchaseOrders"); the next matching call fails every attempt
+ * and the property is deleted, so the queue's retry afterwards goes through normally.
+ */
+function consumeForcedFailure_(label) {
+  const props = PropertiesService.getScriptProperties();
+  const want = props.getProperty('TEST_FAIL_NEXT');
+  if (!want || String(label).indexOf(want) !== 0) return false;
+  props.deleteProperty('TEST_FAIL_NEXT');
+  console.warn('TEST_FAIL_NEXT: forcing failure of ' + label);
+  return true;
 }
 
 function backoff_(attempt, retryAfter) {

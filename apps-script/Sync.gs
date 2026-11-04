@@ -307,3 +307,107 @@ function chunkString_(s) {
   for (let i = 0; i < s.length; i += CACHE_CHUNK_CHARS) out.push(s.slice(i, i + CACHE_CHUNK_CHARS));
   return out;
 }
+
+// --- Stage 4: retry queue (time trigger every 5 minutes; installQueueTrigger in Setup.gs) ------
+
+const QUEUE_RULES = Object.freeze({
+  MAX_ATTEMPTS: 12,                 // about 8 hours of backoff before an admin is emailed
+  BUDGET_MS: 4 * 60 * 1000,
+  MAX_WAIT_MIN: 60,
+});
+
+function processQueue() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) { console.log('processQueue: another run holds the lock; skipping.'); return; }
+  const started = Date.now();
+  const results = [];
+  try {
+    invalidateTable_('Queue');
+    const now = new Date();
+    // Jobs that gave up have a blank next_run_at and are left for an admin.
+    const due = readTable('Queue').rows.filter(j => j.job_id && j.next_run_at !== '' && new Date(j.next_run_at) <= now);
+    const doneRows = [];
+    for (let i = 0; i < due.length; i++) {
+      const job = due[i];
+      if (Date.now() - started > QUEUE_RULES.BUDGET_MS) break;
+      try {
+        const out = runQueueJob_(job);
+        doneRows.push(job._row);
+        results.push({ job: job.job_id, type: job.type, ok: true, result: out });
+      } catch (err) {
+        const attempts = (Number(job.attempts) || 0) + 1;
+        const giveUp = attempts >= QUEUE_RULES.MAX_ATTEMPTS;
+        const waitMin = Math.min(QUEUE_RULES.MAX_WAIT_MIN, 5 * Math.pow(2, attempts - 1));
+        updateRowById('Queue', 'job_id', job.job_id, {
+          attempts: attempts,
+          next_run_at: giveUp ? '' : new Date(Date.now() + waitMin * 60000),
+          last_error: (giveUp ? 'GAVE UP: ' : '') + truncate_(err.message, 300),
+        });
+        if (giveUp) alertAdmins_('a queued job gave up', 'Job ' + job.job_id + ' (' + job.type + ') failed ' + attempts + ' times.\nLast error: ' + err.message + '\nPayload: ' + job.payload_json);
+        results.push({ job: job.job_id, type: job.type, ok: false, attempts: attempts, error: err.message });
+      }
+    }
+    // Bottom-up so earlier row numbers stay valid while deleting.
+    doneRows.sort((a, b) => b - a).forEach(r => sheet_('Queue').deleteRow(r));
+    invalidateTable_('Queue');
+  } finally {
+    lock.releaseLock();
+  }
+  if (results.length) {
+    auditLog({ action: 'queue.run', ok: results.every(r => r.ok), detail: { ms: Date.now() - started, results: results } });
+    console.log('processQueue ' + JSON.stringify(results, null, 2));
+  }
+  return results;
+}
+
+function runQueueJob_(job) {
+  let payload;
+  try { payload = JSON.parse(job.payload_json); } catch (err) { throw new AppError('BAD_JOB', 'Unreadable payload.'); }
+  if (job.type === 'createPO') return finishProvisionalPO_(payload);
+  throw new AppError('BAD_JOB', 'Unknown job type ' + job.type + '.');
+}
+
+/** Turns a PENDING_XERO row into a real Xero PO, then tells the buyer (and approvers if needed). */
+function finishProvisionalPO_(payload) {
+  invalidateTable_('POs');
+  const po = findBy('POs', 'po_id', payload.poId)[0];
+  if (!po) return 'PO row gone; nothing to do';
+  if (po.status !== PO_STATUS.PENDING_XERO) return 'already ' + po.status;
+  const ent = entityById_(po.entity_id).entity_id;
+  const pm = readTable('PaymentMethods').rows.find(r => r.pm_id === po.pm_id);
+  const buyer = findBy('Users', 'user_id', po.buyer_user_id)[0];
+  if (!pm || !buyer) throw new AppError('BAD_JOB', 'Payment method or buyer missing for ' + po.po_id + '.');
+  const xeroStatus = payload.xeroStatus === 'SUBMITTED' ? 'SUBMITTED' : 'AUTHORISED';
+  const ctx = { userId: buyer.user_id, ref: po.po_id };
+
+  // The first attempt may have reached Xero even though its answer was lost; adopt that PO rather
+  // than creating a second one for the same purchase.
+  let xeroPo = findOrphanXeroPo_(po, pm, buyer, ctx);
+  const adopted = !!xeroPo;
+  if (!xeroPo) xeroPo = createXeroPo_(po, pm, buyer.name, xeroStatus, po.provisional_ref, ctx);
+
+  const status = xeroStatus === 'SUBMITTED' ? PO_STATUS.AWAITING_APPROVAL : PO_STATUS.ISSUED;
+  updateRowById('POs', 'po_id', po.po_id, { xero_po_id: xeroPo.PurchaseOrderID, po_number: xeroPo.PurchaseOrderNumber, status: status });
+  const fresh = findBy('POs', 'po_id', po.po_id)[0];
+  notifyBuyerConverted_(fresh, buyer);
+  if (status === PO_STATUS.AWAITING_APPROVAL) {
+    const acct = getRefData(ent).accounts.find(a => String(a.code) === String(po.account_code));
+    notifyApprovers_(fresh, buyer, acct);
+  }
+  auditLog({ userId: buyer.user_id, entityId: ent, action: 'po.provisional_converted', ok: true, ref: po.po_id, detail: { from: po.provisional_ref, to: xeroPo.PurchaseOrderNumber, adopted: adopted } });
+  return po.provisional_ref + ' -> ' + xeroPo.PurchaseOrderNumber + (adopted ? ' (adopted existing Xero PO)' : '');
+}
+
+/** A Xero PO from the PO's date with the same supplier, total and reference prefix, if one exists. */
+function findOrphanXeroPo_(po, pm, buyer, ctx) {
+  const t = entityById_(po.entity_id).xero_tenant_id;
+  const date = Utilities.formatDate(po.created_at instanceof Date ? po.created_at : new Date(po.created_at), APP.TZ, 'yyyy-MM-dd');
+  const refPrefix = poReference_(pm, buyer.name, '');
+  const hit = xeroListPurchaseOrdersByDate(t, date, date, ctx).find(x =>
+    x.Status !== 'DELETED' &&
+    x.Contact && x.Contact.ContactID === po.contact_id &&
+    Math.abs(Number(x.Total) - Number(po.amount_incl_zar)) < 0.005 &&
+    String(x.Reference || '').indexOf(refPrefix) === 0 &&
+    !readTable('POs').rows.some(r => r.xero_po_id === x.PurchaseOrderID));
+  return hit || null;
+}

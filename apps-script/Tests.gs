@@ -828,3 +828,93 @@ function randomStrongPin_() {
   do { p = String(Math.floor(Math.random() * 1e6)).padStart(6, '0'); } while (isWeakPin_(p));
   return p;
 }
+
+// --- Stage 4: PO acceptance helpers ----------------------------------------------------------
+
+const TEST_SUPPLIER_NAME = 'PO Desk Test Supplier';
+
+/** Arms a one-shot "Composio is down" failure for the next PO creation (see consumeForcedFailure_). */
+function armForcedPOFailure() {
+  PropertiesService.getScriptProperties().setProperty('TEST_FAIL_NEXT', 'proxy PUT /PurchaseOrders');
+  console.log('Armed: the next PO creation will fail all 3 attempts and get a provisional ref. processQueue converts it.');
+}
+
+function disarmForcedPOFailure() {
+  PropertiesService.getScriptProperties().deleteProperty('TEST_FAIL_NEXT');
+  console.log('Disarmed.');
+}
+
+/** Median and worst server time per createPO step over the last n POs (from AuditLog). */
+function poTimingReport(n) {
+  n = Number(n) || 10;
+  const rows = readTable('AuditLog').rows
+    .filter(r => r.action === 'po.create' && isTrue_(r.ok))
+    .map(r => { try { return JSON.parse(r.detail_json); } catch (e) { return null; } })
+    .filter(d => d && d.ms && !d.duplicate && d.ms.xero !== undefined)
+    .slice(-n);
+  if (!rows.length) { console.log('No PO creations in the AuditLog yet.'); return; }
+  const steps = ['auth', 'prep', 'lock', 'xero', 'write', 'choice', 'notify', 'total'];
+  const median = a => { const s = a.slice().sort((x, y) => x - y); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2); };
+  const table = steps.map(st => {
+    const vals = rows.map(d => Number(d.ms[st]) || 0);
+    return { step: st, median_ms: median(vals), worst_ms: Math.max.apply(null, vals) };
+  });
+  out_('createPO server time over the last ' + rows.length + ' POs', table_(table, ['step', 'median_ms', 'worst_ms']) +
+    '\n\nPer PO (total ms): ' + rows.map(d => d.ms.total + (d.status === 'PENDING_XERO' ? ' (provisional)' : '')).join(', '));
+}
+
+/**
+ * Deletes every test PO in Xero and marks its row CANCELLED: POs by the test buyer, and POs to the
+ * test supplier by anyone. Then removes their queue jobs and the supplier's history, archives the
+ * test supplier and drops it from the Suppliers list. Safe to run twice.
+ */
+function cleanupTestPOs() {
+  const buyer = findUserByEmail_(TEST_BUYER.email);
+  const ent = TEST_BUYER.entity;
+  const t = entityById_(ent).xero_tenant_id;
+  const ctx = { ref: 'cleanup:test-pos' };
+  const supplierIds = readTable('Suppliers').rows.filter(s => s.entity_id === ent && normName_(s.name) === normName_(TEST_SUPPLIER_NAME)).map(s => s.contact_id);
+  xeroFindContactsByName(t, TEST_SUPPLIER_NAME, ctx).forEach(c => { if (supplierIds.indexOf(c.ContactID) === -1) supplierIds.push(c.ContactID); });
+
+  invalidateTable_('POs');
+  const targets = readTable('POs').rows.filter(r => r.entity_id === ent && r.status !== PO_STATUS.CANCELLED &&
+    ((buyer && String(r.buyer_user_id) === String(buyer.user_id)) || supplierIds.indexOf(r.contact_id) !== -1));
+  const report = [];
+  targets.forEach(r => {
+    const was = r.status;
+    let xeroStatus = '-';
+    try {
+      if (r.xero_po_id) {
+        const cur = xeroGetPurchaseOrder(t, r.xero_po_id, ctx) || {};
+        if (cur.Status !== 'DELETED') xeroUpdatePurchaseOrder(t, r.xero_po_id, { Status: 'DELETED' }, ctx);
+        xeroStatus = (xeroGetPurchaseOrder(t, r.xero_po_id, ctx) || {}).Status;
+      }
+      updateRowById('POs', 'po_id', r.po_id, { status: PO_STATUS.CANCELLED });
+      report.push({ po: r.po_number || r.provisional_ref, amount: r.amount_incl_zar, was: was, xero: xeroStatus, row: 'CANCELLED' });
+    } catch (err) {
+      report.push({ po: r.po_number || r.provisional_ref, amount: r.amount_incl_zar, was: was, xero: 'ERROR ' + err.message, row: r.status });
+    }
+  });
+
+  const poIds = targets.map(r => r.po_id);
+  invalidateTable_('Queue');
+  readTable('Queue').rows.filter(j => poIds.some(id => String(j.payload_json).indexOf(id) !== -1)).map(j => j._row)
+    .sort((a, b) => b - a).forEach(n => sheet_('Queue').deleteRow(n));
+  invalidateTable_('Queue');
+
+  readTable('SupplierHistory').rows.filter(h => h.entity_id === ent && supplierIds.indexOf(h.contact_id) !== -1).map(h => h._row)
+    .sort((a, b) => b - a).forEach(n => sheet_('SupplierHistory').deleteRow(n));
+  invalidateTable_('SupplierHistory');
+
+  const contacts = supplierIds.map(id => {
+    try { xeroSetContactStatus(t, id, 'ARCHIVED', ctx); return TEST_SUPPLIER_NAME + ' ' + id.slice(0, 8) + ' -> ' + (xeroGetContactById(t, id, ctx) || {}).ContactStatus; }
+    catch (err) { return id + ' ERROR ' + err.message; }
+  });
+  const supRows = readTable('Suppliers').rows.filter(s => s.entity_id === ent && supplierIds.indexOf(s.contact_id) !== -1).map(s => s._row);
+  supRows.sort((a, b) => b - a).forEach(n => sheet_('Suppliers').deleteRow(n));
+  invalidateTable_('Suppliers');
+  if (supRows.length) invalidateRefCache(ent);
+
+  out_('cleanupTestPOs', table_(report, ['po', 'amount', 'was', 'xero', 'row']) + '\n\nContacts: ' + (contacts.join('; ') || 'none') +
+    '\nQueue jobs removed for ' + poIds.length + ' PO(s); supplier history cleared; Suppliers rows removed: ' + supRows.length + '.');
+}

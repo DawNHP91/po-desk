@@ -5,12 +5,20 @@ import { h } from './views/ui.js';
 import * as loginView from './views/login.js';
 import * as companiesView from './views/companies.js';
 import * as homeView from './views/home.js';
+import * as newPoView from './views/newpo.js';
+import * as poView from './views/po.js';
+import * as myPosView from './views/mypos.js';
 
-const ROUTES = {
-  '/login': { view: loginView, signedIn: false },
-  '/companies': { view: companiesView, signedIn: true },
-  '/home': { view: homeView, signedIn: true },
-};
+// company: the screen works inside the chosen company, so it shows the "Buying for" bar and
+// sends the user to the picker first if no company is chosen yet.
+const ROUTES = [
+  { re: /^\/login$/, view: loginView, signedIn: false },
+  { re: /^\/companies$/, view: companiesView, signedIn: true },
+  { re: /^\/home$/, view: homeView, signedIn: true, company: true, optional: true },
+  { re: /^\/po\/new$/, view: newPoView, signedIn: true, company: true },
+  { re: /^\/pos$/, view: myPosView, signedIn: true, company: true },
+  { re: /^\/po\/([0-9a-f-]{36})$/, view: poView, signedIn: true, company: true },
+];
 
 const app = document.getElementById('app');
 let cleanup = null;
@@ -23,45 +31,50 @@ export function go(path) {
   else location.hash = path;
 }
 
-function currentPath() {
-  const p = location.hash.replace(/^#/, '');
-  return ROUTES[p] ? p : (auth.isSignedIn() ? landing() : '/login');
+function match(path) {
+  for (const r of ROUTES) {
+    const m = r.re.exec(path);
+    if (m) return { route: r, params: m.slice(1) };
+  }
+  return null;
 }
 
 function render() {
-  const path = currentPath();
-  if (location.hash !== '#' + path) { location.replace('#' + path); return; }
-  const route = ROUTES[path];
+  const path = location.hash.replace(/^#/, '');
+  const found = match(path);
+  if (!found) { location.replace('#' + (auth.isSignedIn() ? landing() : '/login')); return; }
+  const { route, params } = found;
 
   if (restoreState === 'offline' && !auth.isSignedIn()) return renderOffline();
   if (route.signedIn && !auth.isSignedIn()) return go('/login');
   if (!route.signedIn && auth.isSignedIn()) return go(landing());
-  if (path === '/home' && auth.needsCompanyChoice()) return go('/companies');
+  if (route.company && auth.needsCompanyChoice()) return go('/companies');
+  if (route.company && !route.optional && !auth.selectedCompany()) return go('/home');
   if (path === '/companies' && auth.buyCompanies().length <= 1) return go('/home');
 
   if (cleanup) { cleanup(); cleanup = null; }
-  const company = path === '/home' ? auth.selectedCompany() : null;
+  const company = route.company ? auth.selectedCompany() : null;
   applyBrand(company ? company.brandKey : null);
 
-  const main = h('main', { class: 'mx-auto w-full max-w-md px-4 pb-10 pt-4' });
+  const main = h('main', { class: 'mx-auto w-full max-w-md px-4 pb-16 pt-4' });
   app.replaceChildren(shellHeader(company), main);
   window.scrollTo(0, 0);
   const ctx = { go, auth, brand, landing };
-  cleanup = route.view.render(main, ctx) || null;
+  cleanup = route.view.render(main, ctx, params) || null;
 }
 
 function shellHeader(company) {
   const b = brand(company ? company.brandKey : shellKey());
   const me = auth.getMe();
-  const header = h('header', { class: 'sticky top-0 z-20 bg-white shadow-sm' },
+  return h('header', { class: 'sticky top-0 z-20 bg-white shadow-sm' },
     h('div', { class: 'mx-auto flex w-full max-w-md items-center justify-between gap-3 px-4 py-2' },
-      h('img', { src: b.logo, alt: b.name, class: 'h-10 w-auto max-w-[55%] object-contain' }),
+      h('a', { href: '#/home', 'aria-label': 'Home' }, h('img', { src: b.logo, alt: b.name, class: 'h-10 w-auto max-w-[55vw] object-contain' })),
       me ? h('div', { class: 'flex items-center gap-3 text-sm' },
         h('span', { class: 'text-slate-600' }, me.user.firstName),
         h('button', { type: 'button', class: 'rounded-lg px-3 py-2 font-medium text-brand active:bg-slate-100', onclick: async () => { await auth.logout(); go('/login'); } }, 'Sign out'),
       ) : null,
     ),
-    // Always visible once a company is chosen, so nobody raises a PO in the wrong company's books.
+    // Always visible inside a company, so nobody raises a PO in the wrong company's books.
     company ? h('div', { class: 'bg-brand text-white' },
       h('div', { class: 'mx-auto flex w-full max-w-md items-center justify-between gap-3 px-4 py-2' },
         h('p', { class: 'text-base' }, 'Buying for: ', h('strong', { class: 'font-semibold' }, company.name)),
@@ -71,7 +84,6 @@ function shellHeader(company) {
       ),
     ) : null,
   );
-  return header;
 }
 
 function renderOffline() {

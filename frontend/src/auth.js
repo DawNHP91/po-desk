@@ -85,6 +85,20 @@ function autoSelect() {
   if (list.length === 1) session.set(COMPANY_KEY, list[0].entityId);
 }
 
+/** Adds a supplier created on the New PO screen to this session's copy of the list. */
+export async function addSupplier(entityId, supplier) {
+  if (!refCache.has(entityId)) return;
+  const d = await refCache.get(entityId);
+  if (!d.suppliers.some((s) => s.contactId === supplier.contactId)) {
+    d.suppliers.push(supplier);
+    d.suppliers.sort((a, b) => a.name.localeCompare(b.name));
+  }
+}
+
+// The payment method used last time, per company: a convenience only, kept on this device.
+export const lastPm = (entityId) => local.get('poDesk.lastPm.' + entityId) || '';
+export const setLastPm = (entityId, pmId) => local.set('poDesk.lastPm.' + entityId, pmId);
+
 /** Reference data for one company, fetched once per session. */
 export async function refData(entityId) {
   if (!refCache.has(entityId)) {
