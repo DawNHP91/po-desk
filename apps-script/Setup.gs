@@ -400,3 +400,12 @@ function deactivateUatAccounts() {
   });
   console.log('deactivateUatAccounts: ' + UAT_ACCOUNTS.map(a => a.email).join(', ') + ' are off.');
 }
+
+/**
+ * Run from the editor when a permission is missing (e.g. "Send email as you" was unticked on the
+ * consent screen, so no email goes out). Google then asks for every permission PO Desk needs.
+ */
+function grantPermissions() {
+  ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
+  console.log('All permissions granted. Emails left today: ' + MailApp.getRemainingDailyQuota() + '. Now run checkEmail.');
+}
