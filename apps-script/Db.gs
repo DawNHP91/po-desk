@@ -15,7 +15,8 @@ const TABLES = Object.freeze({
   Suppliers: ['entity_id', 'contact_id', 'name', 'vat_number', 'synced_at'],
   SupplierHistory: ['entity_id', 'contact_id', 'account_code', 'uses', 'last_used'],
   POs: ['po_id', 'idem_key', 'entity_id', 'xero_po_id', 'po_number', 'provisional_ref', 'status', 'buyer_user_id', 'pm_id', 'contact_id', 'supplier_name', 'description', 'category_id', 'account_code', 'tax_type', 'amount_incl_zar', 'suggestion_source', 'created_at', 'approver_user_id', 'decided_at', 'bill_id'],
-  Bills: ['bill_id', 'po_id', 'entity_id', 'xero_invoice_id', 'slip_number', 'slip_date', 'supplier_vat_no', 'total_incl_zar', 'vat_zar', 'drive_file_id', 'ocr_json', 'flags', 'created_by', 'created_at'],
+  // status: '' (slip only) | POSTING | QUEUED | BILLED. steps_json: the Xero steps done so far (Stage 6).
+  Bills: ['bill_id', 'po_id', 'entity_id', 'xero_invoice_id', 'slip_number', 'slip_date', 'supplier_vat_no', 'total_incl_zar', 'vat_zar', 'drive_file_id', 'ocr_json', 'flags', 'created_by', 'created_at', 'status', 'steps_json'],
   Queue: ['job_id', 'type', 'payload_json', 'attempts', 'next_run_at', 'last_error'],
   AuditLog: ['ts', 'user_id', 'entity_id', 'action', 'ref', 'ok', 'detail_json'],
 });

@@ -42,6 +42,11 @@ function composioExecute(toolSlug, args, ctx) {
  * Returns { status, data, headers }.
  */
 function composioProxy(method, endpoint, opts, ctx) {
+  const res = composioRequest_('/tools/execute/proxy', proxyBody_(method, endpoint, opts), proxyLabel_(method, endpoint), ctx, classifyProxy_);
+  return { status: res.json.status, data: res.json.data, headers: res.json.headers || {} };
+}
+
+function proxyBody_(method, endpoint, opts) {
   opts = opts || {};
   const body = {
     endpoint: endpoint,
@@ -56,15 +61,70 @@ function composioProxy(method, endpoint, opts, ctx) {
   Object.keys(opts.headers || {}).forEach(k => params.push({ name: k, value: String(opts.headers[k]), type: 'header' }));
   Object.keys(opts.query || {}).forEach(k => params.push({ name: k, value: String(opts.query[k]), type: 'query' }));
   if (params.length) body.parameters = params;
+  return body;
+}
 
-  const label = 'proxy ' + method + ' ' + endpoint.replace(/^https:\/\/api\.xero\.com\/api\.xro\/2\.0/, '');
-  const res = composioRequest_('/tools/execute/proxy', body, label, ctx, function (status, json) {
-    const upstream = json && typeof json.status === 'number' ? json.status : 0;
-    if (status === 200 && upstream >= 200 && upstream < 300) return { ok: true };
-    const msg = errorText_(json) || ('HTTP ' + status + (upstream ? ' / upstream ' + upstream : ''));
-    return { ok: false, retryable: isRetryableStatus_(status) || isRetryableStatus_(upstream), message: msg, upstream: upstream };
+function proxyLabel_(method, endpoint) {
+  return 'proxy ' + method + ' ' + endpoint.replace(/^https:\/\/api\.xero\.com\/api\.xro\/2\.0/, '');
+}
+
+function classifyProxy_(status, json) {
+  const upstream = json && typeof json.status === 'number' ? json.status : 0;
+  if (status === 200 && upstream >= 200 && upstream < 300) return { ok: true };
+  const msg = errorText_(json) || ('HTTP ' + status + (upstream ? ' / upstream ' + upstream : ''));
+  return { ok: false, retryable: isRetryableStatus_(status) || isRetryableStatus_(upstream), message: msg, upstream: upstream };
+}
+
+/**
+ * Several proxy calls at once (UrlFetchApp.fetchAll), for independent steps such as the two slip
+ * attachments of a bill: in sequence they cost the buyer ~2 s each. A retryable failure gets one more
+ * try (again in parallel); whatever still fails is RETURNED, not thrown, so the caller can queue only
+ * that step. calls: [{ method, endpoint, opts, entityId }]. Returns [{ ok, status, data, error, upstream }].
+ */
+function composioProxyAll(calls, ctx) {
+  ctx = ctx || {};
+  if (!calls.length) return [];
+  const apiKey = getSecret_('COMPOSIO_API_KEY');
+  const out = calls.map(() => null);
+  const attempts = calls.map(() => 0);
+  const t0 = Date.now();
+  for (let round = 1; round <= 2; round++) {
+    const todo = calls.map((c, i) => i).filter(i => !out[i] || (!out[i].ok && out[i].retryable && round === 2));
+    if (!todo.length) break;
+    if (round === 2) backoff_(1, null);
+    const live = [];
+    todo.forEach(i => {
+      attempts[i]++;
+      composioStats_.calls++;
+      if (consumeForcedFailure_(proxyLabel_(calls[i].method, calls[i].endpoint))) {
+        out[i] = { ok: false, retryable: false, status: 0, error: 'Forced failure for testing (Script Property TEST_FAIL_NEXT)', forced: true };
+      } else {
+        live.push(i);
+      }
+    });
+    const responses = live.length ? UrlFetchApp.fetchAll(live.map(i => ({
+      url: COMPOSIO_BASE_URL + '/tools/execute/proxy', method: 'post', contentType: 'application/json',
+      headers: { 'x-api-key': apiKey }, payload: JSON.stringify(proxyBody_(calls[i].method, calls[i].endpoint, calls[i].opts)), muteHttpExceptions: true,
+    }))) : [];
+    responses.forEach((resp, k) => {
+      const i = live[k];
+      const status = resp.getResponseCode();
+      let json = null;
+      try { json = JSON.parse(resp.getContentText()); } catch (e) { json = null; }
+      const v = classifyProxy_(status, json);
+      out[i] = v.ok
+        ? { ok: true, status: json.status, data: json.data, log_id: json.log_id }
+        : { ok: false, retryable: !!v.retryable, status: status, upstream: v.upstream || 0, error: truncate_(v.message, 300), data: json && json.data, log_id: json && json.log_id };
+    });
+  }
+  const ms = Date.now() - t0;
+  out.forEach((r, i) => {
+    auditLog({
+      userId: ctx.userId, entityId: calls[i].entityId || ctx.entityId, action: 'composio.' + proxyLabel_(calls[i].method, calls[i].endpoint), ref: ctx.ref, ok: r.ok,
+      detail: { ms: ms, attempts: attempts[i], parallel: calls.length, status: r.status, upstream: r.upstream || undefined, forced: r.forced || undefined, error: r.ok ? undefined : r.error, log_id: r.log_id },
+    });
   });
-  return { status: res.json.status, data: res.json.data, headers: res.json.headers || {} };
+  return out;
 }
 
 /**

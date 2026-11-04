@@ -834,6 +834,9 @@ function randomStrongPin_() {
 // Test suppliers are named "PO Desk Test Supplier …". Cleanup archives them, and Xero's API can't
 // un-archive, so each test run creates a fresh one (testSupplierName()) instead of reusing one.
 const TEST_SUPPLIER_NAME = 'PO Desk Test Supplier';
+// A second test name for "the slip is from another supplier": it must share no word with the first,
+// or the supplier check would call them the same business.
+const TEST_SLIP_SUPPLIER_NAME = 'QA Vendor';
 function testSupplierName() {
   const name = TEST_SUPPLIER_NAME + ' ' + Utilities.formatDate(new Date(), APP.TZ, 'yyyy-MM-dd HHmm');
   console.log('Use this supplier name for the test POs: ' + name);
@@ -880,28 +883,49 @@ function cleanupTestPOs() {
   const ent = TEST_BUYER.entity;
   const t = entityById_(ent).xero_tenant_id;
   const ctx = { ref: 'cleanup:test-pos' };
-  const isTestName = n => normName_(n).indexOf(normName_(TEST_SUPPLIER_NAME)) === 0;
+  const isTestName = n => [TEST_SUPPLIER_NAME, TEST_SLIP_SUPPLIER_NAME].some(p => normName_(n).indexOf(normName_(p)) === 0);
   const supplierIds = readTable('Suppliers').rows.filter(s => s.entity_id === ent && isTestName(s.name)).map(s => s.contact_id);
-  const inXero = xeroSearchContacts(t, TEST_SUPPLIER_NAME, ctx).filter(c => isTestName(c.Name));
+  const inXero = xeroSearchContacts(t, TEST_SUPPLIER_NAME, ctx).concat(xeroSearchContacts(t, TEST_SLIP_SUPPLIER_NAME, ctx)).filter(c => isTestName(c.Name));
   inXero.forEach(c => { if (supplierIds.indexOf(c.ContactID) === -1) supplierIds.push(c.ContactID); });
 
   invalidateTable_('POs');
   const targets = readTable('POs').rows.filter(r => r.entity_id === ent && r.status !== PO_STATUS.CANCELLED &&
     ((buyer && String(r.buyer_user_id) === String(buyer.user_id)) || supplierIds.indexOf(r.contact_id) !== -1));
   const report = [];
+  invalidateTable_('Bills');
+  const billsByPo = {};
+  readTable('Bills').rows.forEach(b => { (billsByPo[b.po_id] = billsByPo[b.po_id] || []).push(b); });
   targets.forEach(r => {
     const was = r.status;
     let xeroStatus = '-';
+    let billStatus = '-';
     try {
+      // Bills first, so a failure halfway never leaves a live bill whose PO is already deleted.
+      (billsByPo[r.po_id] || []).filter(b => b.xero_invoice_id).forEach(b => {
+        const cur = xeroGetInvoiceById(t, b.xero_invoice_id, ctx) || {};
+        if (cur.Status && cur.Status !== 'DELETED' && cur.Status !== 'VOIDED') {
+          xeroProxy_(t, 'POST', '/Invoices/' + b.xero_invoice_id, { body: { Invoices: [{ InvoiceID: b.xero_invoice_id, Status: 'DELETED' }] } }, ctx);
+        }
+        billStatus = (xeroGetInvoiceById(t, b.xero_invoice_id, ctx) || {}).Status;
+      });
       if (r.xero_po_id) {
         const cur = xeroGetPurchaseOrder(t, r.xero_po_id, ctx) || {};
-        if (cur.Status !== 'DELETED') xeroUpdatePurchaseOrder(t, r.xero_po_id, { Status: 'DELETED' }, ctx);
+        if (cur.Status !== 'DELETED') {
+          try {
+            xeroUpdatePurchaseOrder(t, r.xero_po_id, { Status: 'DELETED' }, ctx);
+          } catch (err) {
+            // A billed PO may have to be un-billed before Xero lets it go.
+            if (cur.Status !== 'BILLED') throw err;
+            xeroUpdatePurchaseOrder(t, r.xero_po_id, { Status: 'AUTHORISED' }, ctx);
+            xeroUpdatePurchaseOrder(t, r.xero_po_id, { Status: 'DELETED' }, ctx);
+          }
+        }
         xeroStatus = (xeroGetPurchaseOrder(t, r.xero_po_id, ctx) || {}).Status;
       }
       updateRowById('POs', 'po_id', r.po_id, { status: PO_STATUS.CANCELLED });
-      report.push({ po: r.po_number || r.provisional_ref, amount: r.amount_incl_zar, was: was, xero: xeroStatus, row: 'CANCELLED' });
+      report.push({ po: r.po_number || r.provisional_ref, amount: r.amount_incl_zar, was: was, bill: billStatus, xero: xeroStatus, row: 'CANCELLED' });
     } catch (err) {
-      report.push({ po: r.po_number || r.provisional_ref, amount: r.amount_incl_zar, was: was, xero: 'ERROR ' + err.message, row: r.status });
+      report.push({ po: r.po_number || r.provisional_ref, amount: r.amount_incl_zar, was: was, bill: billStatus, xero: 'ERROR ' + err.message, row: r.status });
     }
   });
 
@@ -909,11 +933,12 @@ function cleanupTestPOs() {
   // Slips of test POs: photos to the bin, Bills rows removed.
   invalidateTable_('Bills');
   const testBills = readTable('Bills').rows.filter(b => poIds.indexOf(b.po_id) !== -1);
+  const jobRefs = poIds.concat(testBills.map(b => b.bill_id));
   testBills.forEach(b => { if (b.drive_file_id) trashSlip_(b.drive_file_id); });
   testBills.map(b => b._row).sort((a, b) => b - a).forEach(n => sheet_('Bills').deleteRow(n));
   invalidateTable_('Bills');
   invalidateTable_('Queue');
-  readTable('Queue').rows.filter(j => poIds.some(id => String(j.payload_json).indexOf(id) !== -1)).map(j => j._row)
+  readTable('Queue').rows.filter(j => jobRefs.some(id => String(j.payload_json).indexOf(id) !== -1)).map(j => j._row)
     .sort((a, b) => b - a).forEach(n => sheet_('Queue').deleteRow(n));
   invalidateTable_('Queue');
 
@@ -934,7 +959,7 @@ function cleanupTestPOs() {
   invalidateTable_('Suppliers');
   if (supRows.length) invalidateRefCache(ent);
 
-  out_('cleanupTestPOs', table_(report, ['po', 'amount', 'was', 'xero', 'row']) + '\n\nContacts: ' + (contacts.join('; ') || 'none') +
+  out_('cleanupTestPOs', table_(report, ['po', 'amount', 'was', 'bill', 'xero', 'row']) + '\n\nContacts: ' + (contacts.join('; ') || 'none') +
     '\nQueue jobs removed for ' + poIds.length + ' PO(s); slips removed: ' + testBills.length + '; supplier history cleared; Suppliers rows removed: ' + supRows.length + '.');
 }
 
@@ -1120,4 +1145,66 @@ function scoreSlipTest() {
 function armGeminiFailure() {
   PropertiesService.getScriptProperties().setProperty('TEST_FAIL_GEMINI', '1');
   console.log('Armed: the next slip read returns "read manually".');
+}
+
+// --- Stage 6: draft bills -----------------------------------------------------------------------
+
+/**
+ * Acceptance check, read back from Xero itself: for every bill PO Desk made in a company in the last
+ * `days` days, the PO number in the bill's Reference, VAT-inclusive amounts, total and VAT equal to
+ * the slip, the slip attached to the bill and to the PO, the PO BILLED, and exactly one bill per slip.
+ */
+function checkBills(entity, days) {
+  const ent = entityById_(entity || 'NHP').entity_id;
+  const t = entityById_(ent).xero_tenant_id;
+  const ctx = { ref: 'check:bills' };
+  const since = Date.now() - (days || 1) * 86400000;
+  invalidateTable_('Bills');
+  invalidateTable_('POs');
+  const pos = {};
+  readTable('POs').rows.forEach(r => { pos[r.po_id] = r; });
+  const bills = readTable('Bills').rows.filter(b => b.entity_id === ent && b.xero_invoice_id && new Date(b.created_at).getTime() >= since);
+  const tick = (ok) => (ok ? '✓' : '✗');
+  let allOk = 0;
+  const rows = bills.map(b => {
+    const po = pos[b.po_id] || {};
+    const steps = parseJson_(b.steps_json) || {};
+    const f = (parseJson_(b.ocr_json) || {}).reviewed || {};
+    try {
+      const inv = xeroGetInvoiceById(t, b.xero_invoice_id, ctx) || {};
+      const billAtt = xeroListAttachments(t, 'Invoices', b.xero_invoice_id, ctx).length;
+      const xpo = xeroFirst_(xeroProxy_(t, 'GET', '/PurchaseOrders/' + po.xero_po_id, {}, ctx).data || {}, 'PurchaseOrders', 'PurchaseOrderID') || {};
+      const poAtt = xeroListAttachments(t, 'PurchaseOrders', po.xero_po_id, ctx).length;
+      const contactId = (inv.Contact || {}).ContactID;
+      const copies = xeroList_(xeroProxy_(t, 'GET', '/Invoices?ContactIDs=' + contactId + '&where=' + encodeURIComponent('Type=="ACCPAY"'), {}, ctx).data || {}, 'Invoices')
+        .filter(i => i.InvoiceNumber === inv.InvoiceNumber && i.Status !== 'DELETED' && i.Status !== 'VOIDED').length;
+      const plan = billPlan_(po, f, contactId);
+      const slipVat = f.vatAmount === null || f.vatAmount === undefined ? null : Number(f.vatAmount);
+      const refOk = String(inv.InvoiceNumber || '').indexOf(String(po.po_number)) === 0;
+      const inclOk = inv.LineAmountTypes === 'Inclusive';
+      const totalOk = Math.abs(Number(inv.Total) - Number(f.totalIncl)) < 0.005;
+      // With a VAT number the bill's VAT must be the slip's; without one, no VAT can be claimed (R0.00).
+      const vatOk = Math.abs(Number(inv.TotalTax) - plan.expectTax) < 0.005 && (plan.mode === 'none' || slipVat === null || Math.abs(Number(inv.TotalTax) - slipVat) < 0.005);
+      const ok = inv.Type === 'ACCPAY' && inv.Status === 'DRAFT' && refOk && inclOk && totalOk && vatOk && billAtt >= 1 && xpo.Status === 'BILLED' && poAtt >= 1 && copies === 1;
+      if (ok) allOk++;
+      return {
+        po: po.po_number, reference: inv.InvoiceNumber, bill: inv.Type + ' ' + inv.Status, incl: tick(inclOk), total: Number(inv.Total).toFixed(2) + ' ' + tick(totalOk),
+        vat: Number(inv.TotalTax).toFixed(2) + ' vs slip ' + (slipVat === null ? '-' : slipVat.toFixed(2)) + (plan.mode === 'none' ? ' (no VAT)' : plan.mode === 'mixed' ? ' (mixed)' : '') + ' ' + tick(vatOk),
+        billSlip: billAtt + ' ' + tick(billAtt >= 1), poStatus: xpo.Status + ' ' + tick(xpo.Status === 'BILLED'), poSlip: poAtt + ' ' + tick(poAtt >= 1), copies: copies + ' ' + tick(copies === 1),
+        supplier: String((inv.Contact || {}).Name || '') + (steps.contactChanged ? ' (changed)' : ''), app: b.status, all: tick(ok),
+      };
+    } catch (err) {
+      return { po: po.po_number, reference: steps.reference, bill: 'ERROR ' + err.message, app: b.status, all: '✗' };
+    }
+  });
+  out_('checkBills ' + ent + ': ' + allOk + ' of ' + rows.length + ' bill(s) pass every check',
+    table_(rows, ['po', 'reference', 'bill', 'incl', 'total', 'vat', 'billSlip', 'poStatus', 'poSlip', 'copies', 'supplier', 'app', 'all']));
+}
+
+function checkBills_NHP() { checkBills('NHP', 1); }
+
+/** One-shot: the next slip upload to a Xero PO fails, to show the bill finishing from the queue. */
+function armBillAttachFailure() {
+  PropertiesService.getScriptProperties().setProperty('TEST_FAIL_NEXT', 'proxy PUT /PurchaseOrders/');
+  console.log('Armed: the next slip attachment to a PO fails once; the queue (every 5 minutes) finishes it.');
 }

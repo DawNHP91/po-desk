@@ -2,6 +2,7 @@
 // an over-limit PO is marked "don't buy yet"; a provisional ref is clearly not a PO number.
 import { h, fill, alertBox, rand, statusChip, fmtDate } from './ui.js';
 import { call } from '../api.js';
+import { billCard, driveLink } from './review.js';
 
 // The createPO answer, handed over by the New PO screen so the number shows without another call.
 const handover = new Map();
@@ -14,7 +15,7 @@ const BANNERS = {
   AWAITING_APPROVAL: ['bg-amber-50 text-amber-950 ring-amber-300', 'Awaiting approval: don’t buy yet', 'This PO is above your limit. Wait until an approver has approved it.'],
   PENDING_XERO: ['bg-sky-50 text-sky-950 ring-sky-200', 'Xero isn’t answering right now', 'This is a provisional reference, not a PO number. PO Desk keeps trying; you’ll get the real PO number by email and here.'],
   DECLINED: ['bg-red-50 text-red-900 ring-red-200', 'Declined: don’t buy', 'An approver declined this PO.'],
-  BILLED: ['bg-slate-100 text-slate-800 ring-slate-200', 'Billed', 'The slip for this PO is in Xero.'],
+  BILLED: ['bg-slate-100 text-slate-800 ring-slate-200', 'Billed', 'The draft bill for this PO is in Xero, with the slip attached.'],
   CANCELLED: ['bg-slate-100 text-slate-700 ring-slate-200', 'Cancelled', 'This PO was cancelled.'],
 };
 
@@ -100,20 +101,28 @@ export function render(root, ctx, params) {
     );
   }
 
-  // Once bought, the slip: photograph it, finish checking it, or see that it is saved.
+  // Once bought, the slip and its bill: photograph it, check it and create the bill, then see the
+  // bill's state with a link to the slip.
   function slipSection(po) {
-    if (po.status !== 'ISSUED' && !(po.slip && po.slip.reviewed)) return null;
+    const s = po.slip;
+    if (po.status !== 'ISSUED' && !(s && s.billStatus)) return null;
     const btn = 'w-full rounded-2xl px-4 py-4 text-base font-semibold touch-manipulation';
-    if (!po.slip) {
+    if (!s) {
       return h('button', { type: 'button', class: btn + ' mt-4 bg-brand text-white active:opacity-90', onclick: () => ctx.go('/po/' + po.poId + '/slip') }, 'Photograph the slip');
     }
-    if (!po.slip.reviewed) {
-      return h('div', { class: 'mt-4 grid grid-cols-2 gap-3' },
-        h('button', { type: 'button', class: btn + ' bg-brand text-white active:opacity-90', onclick: () => ctx.go('/slip/' + po.slip.billId) }, 'Check the slip'),
-        h('button', { type: 'button', class: btn + ' border-2 border-slate-300 bg-white active:bg-slate-100', onclick: () => ctx.go('/po/' + po.poId + '/slip') }, 'Retake photo'));
+    if (s.billStatus) {
+      return h('section', { 'aria-label': 'Bill' },
+        billCard(s, po.poNumber),
+        driveLink(s.slipUrl),
+        h('div', { class: 'mt-2 grid grid-cols-2 gap-3' },
+          h('button', { type: 'button', class: btn + ' border-2 border-slate-300 bg-white active:bg-slate-100', onclick: () => ctx.go('/slip/' + s.billId) }, 'Slip details'),
+          s.billStatus === 'BILLED' ? null : h('button', { type: 'button', class: btn + ' border-2 border-slate-300 bg-white active:bg-slate-100', onclick: load }, 'Check again')));
     }
-    return h('button', { type: 'button', class: 'mt-4 flex w-full items-center justify-between rounded-2xl bg-white px-4 py-4 text-left ring-1 ring-slate-200 active:bg-slate-50', onclick: () => ctx.go('/slip/' + po.slip.billId) },
-      h('span', { class: 'font-semibold text-green-800' }, 'Slip saved ✓'), h('span', { class: 'text-brand' }, po.slip.billed ? 'View' : 'View or correct'));
+    return h('div', {},
+      s.rejected ? h('div', { class: 'mt-4' }, alertBox('Xero didn’t accept the bill: ' + s.rejected)) : null,
+      h('div', { class: 'mt-4 grid grid-cols-2 gap-3' },
+        h('button', { type: 'button', class: btn + ' bg-brand text-white active:opacity-90', onclick: () => ctx.go('/slip/' + s.billId) }, s.reviewed ? 'Create the bill' : 'Check the slip'),
+        h('button', { type: 'button', class: btn + ' border-2 border-slate-300 bg-white active:bg-slate-100', onclick: () => ctx.go('/po/' + po.poId + '/slip') }, 'Retake photo')));
   }
 
   return () => { alive = false; };

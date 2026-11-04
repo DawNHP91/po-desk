@@ -386,7 +386,21 @@ function runQueueJob_(job) {
   let payload;
   try { payload = JSON.parse(job.payload_json); } catch (err) { throw new AppError('BAD_JOB', 'Unreadable payload.'); }
   if (job.type === 'createPO') return finishProvisionalPO_(payload);
+  if (job.type === 'billSteps') return finishBillSteps_(payload);
   throw new AppError('BAD_JOB', 'Unknown job type ' + job.type + '.');
+}
+
+/**
+ * Carries on with a bill whose steps didn't all finish when the buyer submitted it (Main.gs
+ * runBillSteps_). Throws while something is left, so the queue retries with backoff and emails an
+ * admin if it gives up. A bill Xero refused is not retried: the buyer is asked to correct it.
+ */
+function finishBillSteps_(payload) {
+  const r = runBillSteps_(String(payload.billId || ''), {});
+  if (r.status === 'GONE') return 'bill row gone; nothing to do';
+  if (r.rejected) return 'Xero refused the bill; the buyer was asked to correct it: ' + r.rejected;
+  if (r.status !== BILL_STATUS.BILLED) throw new AppError('BILL_PENDING', 'Still to do: ' + r.pending.join(', ') + (r.error ? ' (' + r.error + ')' : ''));
+  return 'bill ' + r.reference + ' complete';
 }
 
 /** Turns a PENDING_XERO row into a real Xero PO, then tells the buyer (and approvers if needed). */

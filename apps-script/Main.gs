@@ -1,5 +1,6 @@
 /**
- * Main.gs — web app entry points and the action handlers for Flow 1 (raise a PO).
+ * Main.gs — web app entry points and the action handlers for Flow 1 (raise a PO) and Flow 2
+ * (slip to draft bill).
  *
  * The browser sends POST with Content-Type text/plain so it is a "simple" CORS request:
  * Apps Script cannot answer an OPTIONS preflight, so JSON content types would fail.
@@ -25,6 +26,7 @@ const ROUTES = {
   readSlip: { tabs: AUTH_TABS.concat(['POs', 'Bills']), fn: (req, ctx) => actionReadSlip_(req, ctx) },
   getSlip: { tabs: AUTH_TABS.concat(['POs', 'Bills']), fn: (req, ctx) => actionGetSlip_(req, ctx) },
   saveSlipReview: { tabs: AUTH_TABS.concat(['POs', 'Bills']), fn: (req, ctx) => actionSaveSlipReview_(req, ctx) },
+  submitBill: { tabs: AUTH_TABS.concat(['POs', 'Bills', 'Queue']), fn: (req, ctx) => actionSubmitBill_(req, ctx) },
 };
 
 const PO_STATUS = Object.freeze({
@@ -124,46 +126,56 @@ function actionCreateSupplier_(req, ctx) {
   if (vat && !/^4\d{9}$/.test(vat)) throw new AppError('BAD_REQUEST', 'A South African VAT number is 10 digits starting with 4.');
   rateLimit_('supplier', ctx.user.user_id, 20, 3600);
 
-  const key = normName_(name);
-  const xctx = { userId: ctx.user.user_id, ref: 'supplier:' + key.slice(0, 40) };
+  const xctx = { userId: ctx.user.user_id, ref: 'supplier:' + normName_(name).slice(0, 40) };
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(PO_RULES.LOCK_WAIT_MS)) throw new AppError('BUSY', 'PO Desk is busy. Please try again.');
   try {
-    const cached = getRefData(ent).suppliers.find(s => normName_(s.name) === key);
-    if (cached) return { supplier: { contactId: cached.contact_id, name: String(cached.name) }, existing: true };
-
-    const t = entityById_(ent).xero_tenant_id;
-    const matches = xeroSearchContacts(t, name, xctx).filter(c => normName_(c.Name) === key);
-    let contact;
-    let existing = false;
-    if (matches.length) {
-      contact = matches.find(c => c.ContactStatus === 'ACTIVE');
-      if (!contact) {
-        throw new AppError('SUPPLIER_ARCHIVED', '“' + matches[0].Name + '” is archived in ' + entityById_(ent).short_name +
-          '’s Xero. Ask your PO Desk admin to restore it in Xero (Contacts, Archived), or choose another supplier.');
-      }
-      existing = true;
-    } else {
-      const fields = { Name: name, IsSupplier: true };
-      if (vat) fields.TaxNumber = vat;
-      const created = xeroCreateContact(t, fields, xctx);
-      if (!created || !created.ContactID) throw new AppError('XERO_FAILED', 'Xero did not return the new supplier.');
-      // A Composio tool once answered from the wrong organisation (XERO_GET_CONTACTS), so prove the
-      // new contact really exists in THIS company before anyone raises a PO against it.
-      let check = null;
-      try { check = xeroGetContactById(t, created.ContactID, xctx); } catch (err) { check = null; }
-      if (!check || check.ContactID !== created.ContactID) {
-        auditLog({ userId: ctx.user.user_id, entityId: ent, action: 'supplier.tenant_mismatch', ok: false, detail: { contactId: created.ContactID } });
-        throw new AppError('TENANT_LEAK', 'The new supplier could not be confirmed in ' + ent + '’s Xero. Please tell your PO Desk admin.');
-      }
-      contact = check;
-    }
-    addSupplierToRef_(ent, contact);
-    auditLog({ userId: ctx.user.user_id, entityId: ent, action: 'supplier.create', ok: true, ref: contact.ContactID, detail: { existing: existing } });
-    return { supplier: { contactId: contact.ContactID, name: String(contact.Name) }, existing: existing };
+    const r = findOrCreateSupplier_(ent, name, vat, xctx);
+    return { supplier: { contactId: r.contact.ContactID, name: String(r.contact.Name) }, existing: r.existing };
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * The synced list first, then Xero itself (archived included), and only then a new contact.
+ * Caller holds the script lock, so two buyers adding the same name can't both create it.
+ * Returns { contact: { ContactID, Name }, existing }.
+ */
+function findOrCreateSupplier_(ent, name, vat, xctx) {
+  const key = normName_(name);
+  const cached = getRefData(ent).suppliers.find(s => normName_(s.name) === key);
+  if (cached) return { contact: { ContactID: cached.contact_id, Name: String(cached.name) }, existing: true };
+
+  const t = entityById_(ent).xero_tenant_id;
+  const matches = xeroSearchContacts(t, name, xctx).filter(c => normName_(c.Name) === key);
+  let contact;
+  let existing = false;
+  if (matches.length) {
+    contact = matches.find(c => c.ContactStatus === 'ACTIVE');
+    if (!contact) {
+      throw new AppError('SUPPLIER_ARCHIVED', '“' + matches[0].Name + '” is archived in ' + entityById_(ent).short_name +
+        '’s Xero. Ask your PO Desk admin to restore it in Xero (Contacts, Archived), or choose another supplier.');
+    }
+    existing = true;
+  } else {
+    const fields = { Name: name, IsSupplier: true };
+    if (vat) fields.TaxNumber = vat;
+    const created = xeroCreateContact(t, fields, xctx);
+    if (!created || !created.ContactID) throw new AppError('XERO_FAILED', 'Xero did not return the new supplier.');
+    // A Composio tool once answered from the wrong organisation (XERO_GET_CONTACTS), so prove the
+    // new contact really exists in THIS company before anyone raises a PO against it.
+    let check = null;
+    try { check = xeroGetContactById(t, created.ContactID, xctx); } catch (err) { check = null; }
+    if (!check || check.ContactID !== created.ContactID) {
+      auditLog({ userId: xctx.userId, entityId: ent, action: 'supplier.tenant_mismatch', ok: false, detail: { contactId: created.ContactID } });
+      throw new AppError('TENANT_LEAK', 'The new supplier could not be confirmed in ' + ent + '’s Xero. Please tell your PO Desk admin.');
+    }
+    contact = check;
+  }
+  addSupplierToRef_(ent, contact);
+  auditLog({ userId: xctx.userId, entityId: ent, action: 'supplier.create', ok: true, ref: contact.ContactID, detail: { existing: existing } });
+  return { contact: contact, existing: existing };
 }
 
 /** Adds a contact to the Suppliers tab and the cached reference data, so it is usable immediately. */
@@ -402,7 +414,7 @@ function poView_(row, data, pm, bill) {
     accountName: acct ? String(acct.name) : '',
     paidWith: pm ? (pm.type === 'CARD' && pm.last4 ? pm.label + ' ••' + pm.last4 : String(pm.label)) : '',
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
-    slip: bill ? { billId: bill.bill_id, reviewed: Number(bill.total_incl_zar) > 0, billed: !!bill.xero_invoice_id } : null,
+    slip: bill ? Object.assign({ billId: bill.bill_id, reviewed: Number(bill.total_incl_zar) > 0, billed: !!bill.xero_invoice_id }, billView_(bill)) : null,
   };
 }
 
@@ -473,13 +485,21 @@ function requireSlipPO_(ctx, poId) {
   return po;
 }
 
-function requireSlipBill_(ctx, billId) {
+/** allowLocked: true only for read-only views; a slip that is on its way to Xero can't be changed. */
+function requireSlipBill_(ctx, billId, allowLocked) {
   const id = str_(billId, 60);
   const bill = id ? findBy('Bills', 'bill_id', id)[0] : null;
   if (!bill) throw new AppError('NOT_FOUND', 'Slip not found.');
   const po = requireSlipPO_(ctx, bill.po_id);
-  if (bill.xero_invoice_id) throw new AppError('BAD_REQUEST', 'This slip is already on a Xero bill.');
+  if (!allowLocked && isBillLocked_(bill)) {
+    throw new AppError('BILL_LOCKED', bill.xero_invoice_id ? 'This slip is already on a Xero bill.' : 'This slip is already being sent to Xero.');
+  }
   return { bill: bill, po: po };
+}
+
+/** Sent to Xero (or on its way): from then on the photo and details stay as they were sent. */
+function isBillLocked_(bill) {
+  return !!(bill && (bill.xero_invoice_id || bill.status));
 }
 
 function slipStatusMessage_(po) {
@@ -524,6 +544,7 @@ function actionUploadSlip_(req, ctx) {
     invalidateTable_('Bills');
     // One draft per PO: a retake replaces the photo and clears anything read from the old one.
     const draft = readTable('Bills').rows.find(b => b.po_id === po.po_id && !b.xero_invoice_id);
+    if (draft && isBillLocked_(draft)) { trashSlip_(file.getId()); throw new AppError('BILL_LOCKED', 'This slip is already being sent to Xero.'); }
     if (draft) {
       replaced = String(draft.drive_file_id || '');
       updateRowById('Bills', 'bill_id', draft.bill_id, { drive_file_id: file.getId(), slip_number: '', slip_date: '', supplier_vat_no: '', total_incl_zar: '', vat_zar: '', ocr_json: '', flags: '' });
@@ -558,32 +579,39 @@ function actionReadSlip_(req, ctx) {
 }
 
 function actionGetSlip_(req, ctx) {
-  const { bill, po } = requireSlipBill_(ctx, req.payload.billId);
+  const { bill, po } = requireSlipBill_(ctx, req.payload.billId, true);
   const stored = parseJson_(bill.ocr_json) || {};
   const view = slipView_(bill, po, stored, stored.reviewed || null);
   if (req.payload.withImage === true) view.image = slipImageBase64_(bill.drive_file_id);
   return view;
 }
 
+// Kept for screens still open from before Stage 6; the review screen now saves through submitBill.
 function actionSaveSlipReview_(req, ctx) {
   const { bill, po } = requireSlipBill_(ctx, req.payload.billId);
   const f = validateSlipFields_(req.payload.fields);
   const flags = slipFlags_(po, f, bill.bill_id);
+  const stored = storeReview_(bill, f, flags, ctx, {});
+  const fileName = slipFileName_(po, f.date, f.totalIncl);
+  try { renameSlip_(bill.drive_file_id, fileName); } catch (err) { console.warn('Rename failed: ' + err.message); }
+  auditLog({ userId: ctx.user.user_id, entityId: po.entity_id, action: 'slip.review', ref: bill.bill_id, ok: true, detail: { po: po.po_number, source: stored.source, edited: stored.edited, flags: flags.map(x => x.code) } });
+  return { saved: true, billId: bill.bill_id, poId: po.po_id, flags: flags, fileName: fileName };
+}
+
+/** Writes the buyer's checked values (and `extra` columns) to the Bills row. Returns the new ocr_json object. */
+function storeReview_(bill, f, flags, ctx, extra) {
   const stored = parseJson_(bill.ocr_json) || {};
   const ex = stored.extracted || {};
   const edited = stored.status === 'ok'
     ? ['supplierName', 'supplierVatNumber', 'slipNumber', 'date', 'totalIncl', 'vatAmount'].filter(k => String(ex[k] === null || ex[k] === undefined ? '' : ex[k]) !== String(f[k] === null ? '' : f[k]))
     : [];
   Object.assign(stored, { reviewed: f, reviewedAt: new Date().toISOString(), reviewedBy: ctx.user.user_id, source: stored.status === 'ok' ? 'gemini' : 'manual', edited: edited });
-  updateRowById('Bills', 'bill_id', bill.bill_id, {
+  updateRowById('Bills', 'bill_id', bill.bill_id, Object.assign({
     slip_number: f.slipNumber, slip_date: new Date(f.date + 'T12:00:00+02:00'), supplier_vat_no: f.supplierVatNumber,
     total_incl_zar: f.totalIncl, vat_zar: f.vatAmount === null ? '' : f.vatAmount,
     ocr_json: JSON.stringify(stored), flags: JSON.stringify(flags.map(x => x.code)),
-  });
-  const fileName = slipFileName_(po, f.date, f.totalIncl);
-  try { renameSlip_(bill.drive_file_id, fileName); } catch (err) { console.warn('Rename failed: ' + err.message); }
-  auditLog({ userId: ctx.user.user_id, entityId: po.entity_id, action: 'slip.review', ref: bill.bill_id, ok: true, detail: { po: po.po_number, source: stored.source, edited: edited, flags: flags.map(x => x.code) } });
-  return { saved: true, billId: bill.bill_id, poId: po.po_id, flags: flags, fileName: fileName };
+  }, extra || {}));
+  return stored;
 }
 
 /** What the review screen needs: values (reviewed, else extracted, else a manual prefill), flags, thresholds. */
@@ -607,6 +635,7 @@ function slipView_(bill, po, stored, reviewed) {
     checks: reviewed || manual ? [] : (stored.checks || []),
     flags: fields.totalIncl ? slipFlags_(po, fields, bill.bill_id) : [],
     thresholds: slipThresholds_(),
+    bill: billView_(bill),
   };
 }
 
@@ -755,4 +784,458 @@ function nearlySame_(x, y) {
 function parseJson_(s) {
   if (!s) return null;
   try { return JSON.parse(s); } catch (err) { return null; }
+}
+
+// --- Flow 2 step 6: the draft bill in Xero (Stage 6) ------------------------------------------
+//
+// Xero has no field linking a bill to a PO, so the link is: the PO number in the bill's Reference,
+// the same slip attached to both, the PO set to BILLED, a History note on each, and the Bills row.
+// Every step is keyed on billId and recorded in Bills.steps_json the moment it succeeds, so a retry
+// (by the queue, or the buyer tapping again) only does what is left and never makes a second bill.
+
+const BILL_STATUS = Object.freeze({ POSTING: 'POSTING', QUEUED: 'QUEUED', BILLED: 'BILLED' });
+// The bill is BILLED once these are done. History notes are "if reachable": tried twice, never queued alone.
+const BILL_STEPS = Object.freeze(['attachBill', 'attachPO', 'poBilled']);
+const BILL_NOTE_STEPS = Object.freeze(['noteBill', 'notePO']);
+const BILL_RULES = Object.freeze({ NOTE_MAX_TRIES: 2, RATE_MAX: 30, RATE_WINDOW_S: 3600, SAFETY_NET_MIN: 10 });
+
+/**
+ * Checks the reviewed values again on the server, settles the supplier, then creates the DRAFT bill
+ * and runs the remaining steps. payload: { billId, fields, supplier?: { mode: 'keep' } |
+ * { mode: 'existing', contactId } | { mode: 'new' } } — supplier is required when the slip's
+ * supplier doesn't match the PO's. Submitting again returns the first bill (duplicate: true).
+ */
+function actionSubmitBill_(req, ctx) {
+  const T = stepTimer_(ctx);
+  const p = req.payload;
+  const { bill, po } = requireSlipBill_(ctx, p.billId, true);
+  if (readTable('Bills').headers.indexOf('steps_json') === -1) throw new AppError('SETUP_ORDER', 'PO Desk needs a quick update before bills can be made. Ask your PO Desk admin to run setupSheets().');
+  if (isBillLocked_(bill)) return Object.assign(billResult_(bill, po), { duplicate: true });
+  if (po.status !== PO_STATUS.ISSUED) throw new AppError('BAD_REQUEST', slipStatusMessage_(po));
+  if (!bill.drive_file_id) throw new AppError('BAD_REQUEST', 'Photograph the slip first.');
+  const f = validateSlipFields_(p.fields);
+  const flags = slipFlags_(po, f, bill.bill_id);
+  billPlan_(po, f, po.contact_id);   // VAT and tax-type problems surface now, before anything reaches Xero
+  const mismatch = flags.some(x => x.code === 'SUPPLIER_MISMATCH');
+  const choice = p.supplier && typeof p.supplier === 'object' ? p.supplier : null;
+  if (mismatch && !choice) {
+    throw new AppError('SUPPLIER_CHOICE', 'The slip is from “' + f.supplierName + '”, but the PO is for “' + po.supplier_name + '”. Choose which supplier the bill is for.');
+  }
+  rateLimit_('bill', ctx.user.user_id, BILL_RULES.RATE_MAX, BILL_RULES.RATE_WINDOW_S);
+  T.mark('prep');
+
+  const xctx = { userId: ctx.user.user_id, ref: bill.bill_id };
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(PO_RULES.LOCK_WAIT_MS)) throw new AppError('BUSY', 'PO Desk is busy. Tap Create the bill again: it won’t make a second bill.');
+  let supplier;
+  try {
+    // Inside the lock: a double tap waits here, then finds the bill already claimed.
+    invalidateTable_('Bills');
+    const cur = findBy('Bills', 'bill_id', bill.bill_id)[0];
+    if (!cur || String(cur.drive_file_id) !== String(bill.drive_file_id)) throw new AppError('CONFLICT', 'The slip changed while you were checking it. Open it again.');
+    if (isBillLocked_(cur)) return Object.assign(billResult_(cur, po), { duplicate: true });
+    supplier = mismatch && choice.mode !== 'keep' ? resolveBillSupplier_(po, f, choice, xctx) : { contactId: String(po.contact_id), name: String(po.supplier_name), created: false };
+    const plan = billPlan_(po, f, supplier.contactId);
+    // A new round per submission, so Xero's stored answer to a refused earlier attempt is never replayed.
+    const round = (Number((parseJson_(cur.steps_json) || {}).round) || 0) + 1;
+    const steps = {
+      v: 1, round: round, reference: plan.reference, contactId: supplier.contactId, supplierName: supplier.name,
+      contactChanged: supplier.contactId !== String(po.contact_id), supplierCreated: supplier.created, supplierChoice: mismatch ? choice.mode : '',
+      notes: flags.map(x => x.message), buyer: firstName_(ctx.user.name), mode: plan.mode,
+      tries: { bill: 1 }, done: {}, startedAt: new Date().toISOString(),
+    };
+    storeReview_(cur, f, flags, ctx, { status: BILL_STATUS.POSTING, steps_json: JSON.stringify(steps) });
+    // Safety net: if this request dies half-way, the queue finishes the job from what was recorded.
+    enqueueBillJob_(bill.bill_id, new Date(Date.now() + BILL_RULES.SAFETY_NET_MIN * 60000));
+  } finally {
+    lock.releaseLock();
+  }
+  // Final name before attaching, so Xero shows <PO>_<date>_<supplier>_<total>.jpg too.
+  try { renameSlip_(bill.drive_file_id, slipFileName_(po, f.date, f.totalIncl)); } catch (err) { console.warn('Rename failed: ' + err.message); }
+  T.mark('claim');
+
+  const r = runBillSteps_(bill.bill_id, { userId: ctx.user.user_id, fromSubmit: true });
+  T.mark('xero');
+  if (r.rejected) {
+    dropBillJob_(bill.bill_id);
+    auditLog({ userId: ctx.user.user_id, entityId: po.entity_id, action: 'bill.submit', ref: bill.bill_id, ok: false, detail: { rejected: r.rejected, ms: T.all() } });
+    throw new AppError('XERO_REJECTED', 'Xero didn’t accept this bill: ' + r.rejected);
+  }
+  if (r.status === BILL_STATUS.BILLED) dropBillJob_(bill.bill_id);
+  else setBillJobDue_(bill.bill_id, new Date(), r.error);   // the next queue run (≤ 5 min) carries on
+  T.mark('finish');
+
+  invalidateTable_('Bills');
+  invalidateTable_('POs');
+  const freshBill = findBy('Bills', 'bill_id', bill.bill_id)[0];
+  const freshPo = findBy('POs', 'po_id', po.po_id)[0];
+  const ms = T.all();
+  auditLog({
+    userId: ctx.user.user_id, entityId: po.entity_id, action: 'bill.submit', ref: bill.bill_id, ok: true,
+    detail: { po: po.po_number, status: r.status, reference: r.reference, pending: r.pending, supplierChanged: supplier.contactId !== String(po.contact_id), flags: flags.map(x => x.code), ms: ms },
+  });
+  return Object.assign(billResult_(freshBill, freshPo), { flags: flags, serverMs: ms });
+}
+
+/** What the browser gets back from submitBill: the PO, the bill state and where the slip is. */
+function billResult_(bill, po) {
+  return Object.assign({ billId: bill.bill_id, poId: po.po_id, poNumber: String(po.po_number), poStatus: po.status }, billView_(bill));
+}
+
+/** The bill's state as the browser sees it (PO detail, review screen). No Xero IDs. */
+function billView_(bill) {
+  const steps = parseJson_(bill.steps_json) || {};
+  const done = steps.done || {};
+  const status = String(bill.status || '');
+  const pending = status === BILL_STATUS.QUEUED || status === BILL_STATUS.POSTING
+    ? (bill.xero_invoice_id ? [] : ['bill']).concat(BILL_STEPS.filter(k => !done[k]))
+    : [];
+  const x = steps.xero || {};
+  return {
+    billStatus: status,
+    billRef: steps.reference || '',
+    invoiceCreated: !!bill.xero_invoice_id,
+    pending: pending,
+    xeroTotal: x.total === undefined ? null : x.total,
+    xeroVat: x.tax === undefined ? null : x.tax,
+    vatMatches: steps.vatMatches === undefined ? null : steps.vatMatches,
+    billSupplier: steps.supplierName || '',
+    supplierChanged: !!steps.contactChanged,
+    billError: status === BILL_STATUS.QUEUED ? truncate_(steps.lastError || '', 200) : '',
+    rejected: status ? '' : truncate_(steps.rejected || '', 300),
+    // Opens in Google Drive for the account that owns PO Desk only: the file is never shared.
+    slipUrl: bill.drive_file_id ? 'https://drive.google.com/file/d/' + encodeURIComponent(bill.drive_file_id) + '/view' : '',
+  };
+}
+
+/**
+ * The supplier the buyer chose when the slip's name didn't match the PO's: one already in the list,
+ * or the name on the slip, found by VAT number, by name, in Xero, or else created there.
+ */
+function resolveBillSupplier_(po, f, choice, xctx) {
+  const ent = po.entity_id;
+  const suppliers = getRefData(ent).suppliers;
+  if (choice.mode === 'existing') {
+    const s = suppliers.find(x => String(x.contact_id) === String(choice.contactId));
+    if (!s) throw new AppError('BAD_REQUEST', 'That supplier isn’t in ' + ent + '’s list any more. Choose again.');
+    return { contactId: String(s.contact_id), name: String(s.name), created: false };
+  }
+  if (choice.mode !== 'new') throw new AppError('BAD_REQUEST', 'Choose which supplier the bill is for.');
+  // A VAT number identifies the business better than a name printed on a till slip.
+  if (f.supplierVatNumber) {
+    const byVat = suppliers.filter(x => String(x.vat_number || '').replace(/\D/g, '') === f.supplierVatNumber);
+    if (byVat.length === 1) return { contactId: String(byVat[0].contact_id), name: String(byVat[0].name), created: false };
+  }
+  const r = findOrCreateSupplier_(ent, f.supplierName, f.supplierVatNumber, xctx);
+  return { contactId: String(r.contact.ContactID), name: String(r.contact.Name), created: !r.existing };
+}
+
+/** "<PO number> · <slip number>" (CLAUDE.md Flow 2 step 6). */
+function billReference_(po, f) {
+  return String(po.po_number) + (f.slipNumber ? ' · ' + f.slipNumber : '');
+}
+
+function round2_(n) {
+  return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+}
+
+/**
+ * The bill as Xero should get it, worked out from the checked slip. VAT:
+ *  - no supplier VAT number, or a slip with R0.00 VAT (fuel is zero-rated): every line at the no-VAT type;
+ *  - VAT about rate/(100+rate) of the total (within the slip-reading tolerance): every line at 15%;
+ *  - less VAT than that: a mixed slip (e.g. diesel plus a cold drink): one 15% line big enough to
+ *    carry exactly the slip's VAT, and one no-VAT line for the rest, since the slip doesn't say which
+ *    item is which.
+ * Xero works out each line's VAT itself; when the sum misses the slip's VAT by a few cents, the biggest
+ * line's TaxAmount is set so the bill's VAT equals the slip's to the cent.
+ */
+function billPlan_(po, f, contactId) {
+  const ent = po.entity_id;
+  const rates = {};
+  getRefData(ent).taxRates.forEach(r => { if (String(r.status) === 'ACTIVE') rates[String(r.tax_type)] = Number(r.rate); });
+  const noVat = String(getConfig('NO_VAT_TAX_TYPE', 'NONE'));
+  const poType = String(po.tax_type || '');
+  // Keep the PO's own VAT type if it is a standard-rate one (e.g. a capital-goods type); the old 14% never.
+  const vatType = rates[poType] > 0 && rates[poType] !== 14 ? poType : String(getConfig('PURCHASE_TAX_TYPE', 'INPUT3'));
+  if (!(rates[vatType] > 0) || !(noVat in rates)) throw new AppError('CONFIG_MISSING', 'The VAT types for bills aren’t set up for ' + ent + '. Please tell your PO Desk admin.');
+  const rate = rates[vatType];
+  const taxOf = (amount) => round2_(amount * rate / (100 + rate));
+  const total = round2_(f.totalIncl);
+  const vat = f.vatAmount === null || f.vatAmount === undefined ? null : round2_(f.vatAmount);
+  const fullVat = taxOf(total);
+  const tol = Math.max(OCR.VAT_TOLERANCE_ZAR, fullVat * OCR.VAT_TOLERANCE_PCT / 100);
+  let mode;
+  if (!f.supplierVatNumber || vat === 0) mode = 'none';
+  else if (vat === null || Math.abs(vat - fullVat) <= tol) mode = 'full';
+  else if (vat < fullVat) mode = 'mixed';
+  else throw new AppError('BAD_REQUEST', 'The VAT on the slip (' + randText_(vat) + ') is more than ' + rate + '% VAT on the total can be (' + randText_(fullVat) + '). Check both amounts.');
+
+  const what = String(po.description);
+  let lines;
+  if (mode === 'mixed') {
+    const taxable = Math.min(total, round2_(vat * (100 + rate) / rate));
+    lines = [{ d: what + ' (items with VAT)', a: taxable, t: vatType }];
+    const rest = round2_(total - taxable);
+    if (rest > 0) lines.push({ d: what + ' (items without VAT: zero-rated or exempt)', a: rest, t: noVat });
+  } else {
+    const type = mode === 'none' ? noVat : vatType;
+    const slip = f.lineItems || [];
+    const sum = round2_(slip.reduce((s, li) => s + Number(li.lineTotalIncl), 0));
+    // The slip's own items only when they add up to the total exactly; otherwise one line for the total.
+    lines = slip.length && Math.abs(sum - total) < 0.005
+      ? slip.map(li => ({ d: li.description + (li.qty && li.qty !== 1 ? ' × ' + li.qty : ''), a: round2_(li.lineTotalIncl), t: type }))
+      : [{ d: what, a: total, t: type }];
+  }
+  lines.forEach(l => { l.tax = l.t === noVat ? 0 : taxOf(l.a); });
+  let expectTax = round2_(lines.reduce((s, l) => s + l.tax, 0));
+  let overrides = false;
+  if (mode !== 'none' && vat !== null && Math.abs(vat - expectTax) >= 0.005) {
+    const big = lines.filter(l => l.t !== noVat).sort((a, b) => Math.abs(b.a) - Math.abs(a.a))[0];
+    big.tax = round2_(big.tax + vat - expectTax);
+    big.override = true;
+    overrides = true;
+    expectTax = vat;
+  }
+  const reference = billReference_(po, f);
+  const invoice = (withOverrides) => ({
+    Contact: { ContactID: contactId }, Date: f.date, DueDate: f.date, InvoiceNumber: reference, Reference: reference,
+    LineItems: lines.map(l => {
+      const li = { Description: truncate_(l.d, 4000), Quantity: 1, UnitAmount: l.a, AccountCode: String(po.account_code), TaxType: l.t };
+      if (withOverrides && l.override) li.TaxAmount = l.tax;
+      return li;
+    }),
+  });
+  return { reference: reference, mode: mode, total: total, expectTax: expectTax, overrides: overrides, invoice: invoice(true), invoicePlain: overrides ? invoice(false) : null, lines: lines.length };
+}
+
+/**
+ * Runs whatever is left for one bill: the bill itself, the slip on the bill and on the PO, History
+ * notes, then the PO's status. Never throws for a Xero failure: it records it and returns
+ * { status, reference, pending, error } or { rejected } when Xero refused the bill's data.
+ * opts.fromSubmit: the first run, straight from the buyer's tap (nothing can exist in Xero yet).
+ */
+function runBillSteps_(billId, opts) {
+  opts = opts || {};
+  invalidateTable_('Bills');
+  invalidateTable_('POs');
+  const bill = findBy('Bills', 'bill_id', billId)[0];
+  if (!bill) return { status: 'GONE' };
+  const po = findBy('POs', 'po_id', bill.po_id)[0];
+  const steps = parseJson_(bill.steps_json) || {};
+  steps.done = steps.done || {};
+  steps.tries = steps.tries || {};
+  const errors = {};
+  const f = (parseJson_(bill.ocr_json) || {}).reviewed;
+  if (!po || !f || !steps.contactId) throw new AppError('BAD_JOB', 'Bill ' + billId + ' has no checked slip or supplier.');
+  const t = entityById_(po.entity_id).xero_tenant_id;
+  const ctx = { userId: opts.userId || bill.created_by, entityId: po.entity_id, ref: billId };
+  const idem = (step) => 'po-desk-' + step + '-' + billId + '-r' + (Number(steps.round) || 1) + '-' + steps.tries[step];
+
+  // 1. The bill.
+  let invoiceId = String(bill.xero_invoice_id || '');
+  if (!invoiceId) {
+    let created = null;
+    let adopted = false;
+    try {
+      const plan = billPlan_(po, f, steps.contactId);
+      if (!opts.fromSubmit) {
+        // An earlier try may have created the bill and lost the answer: find it before making one.
+        steps.tries.bill = (Number(steps.tries.bill) || 1) + 1;
+        writeBillState_(billId, steps, {});
+        created = xeroFindBillByNumber(t, steps.contactId, plan.reference, ctx);
+        adopted = !!created;
+      }
+      if (!created) created = createBillWithFallback_(t, plan, idem('bill'), steps, ctx);
+      steps.xero = { total: round2_(created.Total), tax: round2_(created.TotalTax), number: String(created.InvoiceNumber || '') };
+      steps.totalMatches = Math.abs(Number(created.Total) - plan.total) < 0.005;
+      steps.vatMatches = Math.abs(Number(created.TotalTax) - plan.expectTax) < 0.005;
+    } catch (err) {
+      if (isXeroRejection_(err)) {
+        steps.rejected = err.message;
+        writeBillState_(billId, steps, { status: '' });
+        notifyBillRejected_(bill, po, err.message, opts.fromSubmit);
+        return { status: '', rejected: err.message };
+      }
+      steps.lastError = 'Creating the bill: ' + truncate_(err.message, 250);
+      writeBillState_(billId, steps, { status: BILL_STATUS.QUEUED });
+      return { status: BILL_STATUS.QUEUED, reference: steps.reference, pending: ['bill'].concat(BILL_STEPS), error: steps.lastError };
+    }
+    invoiceId = String(created.InvoiceID);
+    steps.done.bill = new Date().toISOString();
+    if (adopted) steps.adopted = true;
+    delete steps.rejected;
+    markBillCreated_(bill, po, invoiceId, steps);
+  }
+
+  // 2. The slip on both records, and the bill's note (independent: in parallel).
+  const want = (k) => !steps.done[k] && !(BILL_NOTE_STEPS.indexOf(k) !== -1 && (Number(steps.tries[k]) || 0) >= BILL_RULES.NOTE_MAX_TRIES);
+  let file = null;
+  if (want('attachBill') || want('attachPO')) {
+    file = DriveApp.getFileById(bill.drive_file_id);
+    keepSlipPrivate_(file);
+  }
+  const fileName = file ? file.getName() : '';
+  if (file && !opts.fromSubmit) {
+    // A lost answer may hide an attachment that did arrive: look before sending the photo again.
+    [['attachBill', 'Invoices', invoiceId], ['attachPO', 'PurchaseOrders', String(po.xero_po_id)]].forEach(([k, type, id]) => {
+      if (!want(k) || !(Number(steps.tries[k]) > 0)) return;
+      try { if (xeroListAttachments(t, type, id, ctx).some(a => a.FileName === fileName)) steps.done[k] = new Date().toISOString(); } catch (err) { /* attach again below */ }
+    });
+  }
+  const blob = file ? file.getBlob() : null;
+  const b64 = blob && (want('attachBill') || want('attachPO')) ? Utilities.base64Encode(blob.getBytes()) : '';
+  const group1 = [];
+  if (want('attachBill')) group1.push(['attachBill', () => xeroAttachmentCall_(t, 'Invoices', invoiceId, fileName, b64, 'image/jpeg', idem('attachBill'))]);
+  if (want('attachPO')) group1.push(['attachPO', () => xeroAttachmentCall_(t, 'PurchaseOrders', String(po.xero_po_id), fileName, b64, 'image/jpeg', idem('attachPO'))]);
+  if (want('noteBill')) group1.push(['noteBill', () => xeroHistoryCall_(t, 'Invoices', invoiceId, billNoteText_(po, f, steps), idem('noteBill'))]);
+  runBillGroup_(group1, steps, errors, ctx);
+
+  // 3. The PO's status once its slip is on it (Xero may refuse attachments on a billed PO), and its note.
+  const group2 = [];
+  if (want('poBilled') && steps.done.attachPO) group2.push(['poBilled', () => xeroPoUpdateCall_(t, String(po.xero_po_id), 'BILLED', steps.contactChanged ? steps.contactId : '', idem('poBilled'))]);
+  if (want('notePO')) group2.push(['notePO', () => xeroHistoryCall_(t, 'PurchaseOrders', String(po.xero_po_id), poNoteText_(f, steps), idem('notePO'))]);
+  runBillGroup_(group2, steps, errors, ctx);
+  if (errors.poBilled && errors.poBilled.rejected && steps.contactChanged && !steps.poContactRefused) {
+    // Moving the PO to the slip's supplier is a nicety; marking it BILLED is not. Try without it.
+    steps.poContactRefused = errors.poBilled.message;
+    runBillGroup_([['poBilled', () => xeroPoUpdateCall_(t, String(po.xero_po_id), 'BILLED', '', idem('poBilled') + '-nc')]], steps, errors, ctx);
+  }
+  if (errors.poBilled) {
+    // Already BILLED (e.g. the answer was lost last time)? Then the step is done.
+    try { const cur = xeroGetPurchaseOrder(t, String(po.xero_po_id), ctx); if (cur && cur.Status === 'BILLED') { steps.done.poBilled = new Date().toISOString(); delete errors.poBilled; } } catch (err) { /* stays pending */ }
+  }
+
+  const pending = BILL_STEPS.filter(k => !steps.done[k]);
+  const status = pending.length ? BILL_STATUS.QUEUED : BILL_STATUS.BILLED;
+  const errText = Object.keys(errors).map(k => k + ': ' + errors[k].message).join(' | ');
+  if (errText) steps.lastError = truncate_(errText, 300); else if (!pending.length) delete steps.lastError;
+  if (!pending.length) steps.finishedAt = new Date().toISOString();
+  writeBillState_(billId, steps, { status: status });
+  return { status: status, reference: steps.reference, pending: pending, error: errText, vatMatches: steps.vatMatches };
+}
+
+/** Creates the bill; if Xero refuses the cent-level VAT adjustment, creates it without and says so. */
+function createBillWithFallback_(t, plan, idemKey, steps, ctx) {
+  try {
+    return xeroCreateBillInclusive(t, plan.invoice, idemKey, ctx);
+  } catch (err) {
+    if (!plan.invoicePlain || !isXeroRejection_(err)) throw err;
+    steps.taxOverrideRefused = truncate_(err.message, 200);
+    return xeroCreateBillInclusive(t, plan.invoicePlain, idemKey + '-plain', ctx);
+  }
+}
+
+/**
+ * Runs [[step, () => call]] in parallel and records each outcome on `steps`, or in `errors` as
+ * { message, rejected } (rejected: Xero refused the data itself, so the same request won't succeed).
+ */
+function runBillGroup_(group, steps, errors, ctx) {
+  if (!group.length) return;
+  const calls = [];
+  group.forEach(([k, make]) => {
+    steps.tries[k] = (Number(steps.tries[k]) || 0) + 1;
+    try { calls.push([k, make()]); } catch (err) { errors[k] = { message: err.message, rejected: true }; }
+  });
+  const results = xeroProxyAll_(calls.map(c => c[1]), ctx);
+  results.forEach((r, i) => {
+    const k = calls[i][0];
+    const verr = r.ok ? xeroValidationMessages_(r.data) : [];
+    if (r.ok && !verr.length) { steps.done[k] = new Date().toISOString(); delete errors[k]; return; }
+    const code = Number(r.upstream) || 0;
+    errors[k] = { message: truncate_(verr.join('; ') || r.error || 'failed', 200), rejected: verr.length > 0 || (code >= 400 && code < 500 && [401, 403, 408, 429].indexOf(code) === -1) };
+  });
+}
+
+function billNoteText_(po, f, steps) {
+  const parts = ['PO Desk: bill for purchase order ' + po.po_number + ' (PO amount ' + randText_(Number(po.amount_incl_zar)) + ').',
+    'Slip ' + (f.slipNumber || 'without a number') + ' of ' + f.date + ', checked by ' + (steps.buyer || 'the buyer') + '; the photo is attached.'];
+  if (steps.contactChanged) parts.push('Supplier changed at the buyer’s choice from the PO’s supplier to ' + steps.supplierName + '.');
+  else if (steps.supplierChoice === 'keep') parts.push('The slip names another supplier; the buyer kept the PO’s supplier.');
+  if (steps.mode === 'mixed') parts.push('Mixed slip: one line carries the slip’s VAT, the rest is without VAT.');
+  if ((steps.notes || []).length) parts.push('Notes: ' + steps.notes.join(' '));
+  return parts.join(' ');
+}
+
+function poNoteText_(f, steps) {
+  return 'PO Desk: billed on draft bill ' + steps.reference + ' (slip total ' + randText_(f.totalIncl) + (f.vatAmount === null ? '' : ', VAT ' + randText_(f.vatAmount)) + ').';
+}
+
+/** Bills row and POs row once the bill exists. Under the lock: both tabs are shared with buyers. */
+function markBillCreated_(bill, po, invoiceId, steps) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    invalidateTable_('Bills');
+    invalidateTable_('POs');
+    updateRowById('Bills', 'bill_id', bill.bill_id, { xero_invoice_id: invoiceId, steps_json: JSON.stringify(steps) });
+    const patch = { status: PO_STATUS.BILLED, bill_id: bill.bill_id };
+    if (steps.contactChanged) { patch.contact_id = steps.contactId; patch.supplier_name = steps.supplierName; }
+    updateRowById('POs', 'po_id', po.po_id, patch);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function writeBillState_(billId, steps, patch) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    invalidateTable_('Bills');
+    updateRowById('Bills', 'bill_id', billId, Object.assign({ steps_json: JSON.stringify(steps) }, patch || {}));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Slips are never shared: "View slip" opens only for the Google account that owns PO Desk. */
+function keepSlipPrivate_(file) {
+  try {
+    if (file.getSharingAccess() !== DriveApp.Access.PRIVATE) file.setSharing(DriveApp.Access.PRIVATE, DriveApp.Permission.NONE);
+  } catch (err) {
+    console.warn('Could not check sharing of slip ' + file.getId() + ': ' + err.message);
+  }
+}
+
+/** One queue job per bill. Caller holds the lock. */
+function enqueueBillJob_(billId, when) {
+  invalidateTable_('Queue');
+  const job = readTable('Queue').rows.find(j => j.type === 'billSteps' && (parseJson_(j.payload_json) || {}).billId === billId);
+  if (job) { updateRowById('Queue', 'job_id', job.job_id, { next_run_at: when }); return; }
+  appendRow('Queue', { job_id: Utilities.getUuid(), type: 'billSteps', payload_json: JSON.stringify({ billId: billId }), attempts: 0, next_run_at: when, last_error: '' });
+}
+
+function setBillJobDue_(billId, when, error) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    invalidateTable_('Queue');
+    const job = readTable('Queue').rows.find(j => j.type === 'billSteps' && (parseJson_(j.payload_json) || {}).billId === billId);
+    if (job) updateRowById('Queue', 'job_id', job.job_id, { next_run_at: when, last_error: truncate_(error || '', 300) });
+    else enqueueBillJob_(billId, when);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function dropBillJob_(billId) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    invalidateTable_('Queue');
+    readTable('Queue').rows.filter(j => j.type === 'billSteps' && (parseJson_(j.payload_json) || {}).billId === billId)
+      .map(j => j._row).sort((a, b) => b - a).forEach(n => sheet_('Queue').deleteRow(n));
+    invalidateTable_('Queue');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** A queued bill that Xero then refused: the buyer is told to correct it (and admins, as a backstop). */
+function notifyBillRejected_(bill, po, message, buyerIsWaiting) {
+  if (buyerIsWaiting) return;   // they see the message on screen
+  const buyer = findBy('Users', 'user_id', po.buyer_user_id)[0];
+  const body = 'Xero didn’t accept the bill for ' + po.po_number + ' (' + po.supplier_name + '):\n\n' + message +
+    '\n\nOpen the PO in PO Desk, correct the slip details and tap Create the bill again.';
+  if (buyer) sendMail_(buyer.email, 'PO Desk: the bill for ' + po.po_number + ' needs a correction', body);
+  alertAdmins_('a bill was refused by Xero', body);
 }

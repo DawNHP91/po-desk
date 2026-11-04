@@ -50,10 +50,29 @@ function xeroTool_(toolSlug, tenantId, args, ctx, tenantParam) {
 }
 
 function xeroProxy_(tenantId, method, path, opts, ctx) {
+  const c = xeroProxyCall_(tenantId, method, path, opts);
+  return composioProxy(c.method, c.endpoint, c.opts, Object.assign({}, ctx || {}, { entityId: c.entityId }));
+}
+
+/** One proxy call, tenant-checked, ready for xeroProxy_ or (in parallel) xeroProxyAll_. */
+function xeroProxyCall_(tenantId, method, path, opts) {
   const g = assertTenant_(tenantId);
   opts = Object.assign({}, opts || {});
   opts.headers = Object.assign({ Accept: 'application/json' }, opts.headers || {}, { 'xero-tenant-id': g.tenantId });
-  return composioProxy(method, XERO_API + path, opts, Object.assign({}, ctx || {}, { entityId: g.entityId }));
+  return { method: method, endpoint: XERO_API + path, opts: opts, entityId: g.entityId };
+}
+
+/** Runs tenant-checked calls in parallel; returns per-call results instead of throwing (Composio.gs). */
+function xeroProxyAll_(calls, ctx) {
+  return composioProxyAll(calls, ctx);
+}
+
+/**
+ * Xero keeps the answer to a PUT/POST under its Idempotency-Key (max 128 characters), so a retry of
+ * the same request returns the first result instead of creating a second bill or attachment.
+ */
+function idemHeader_(key) {
+  return key ? { 'Idempotency-Key': String(key).slice(0, 128) } : {};
 }
 
 // --- Response shape helpers -------------------------------------------------------------------
@@ -348,6 +367,74 @@ function xeroListPurchaseOrdersByDate(tenantId, dateFrom, dateTo, ctx) {
   const path = '/PurchaseOrders?DateFrom=' + encodeURIComponent(dateFrom) + '&DateTo=' + encodeURIComponent(dateTo || dateFrom);
   const res = xeroProxy_(tenantId, 'GET', path, {}, ctx);
   return xeroList_(res.data || {}, 'PurchaseOrders');
+}
+
+// --- Stage 6: draft bills (proxy) -------------------------------------------------------------
+
+/**
+ * Creates a DRAFT supplier bill with VAT-inclusive amounts in ONE call. PUT /Invoices only ever
+ * creates (POST would update a match). The create TOOL drops LineAmountTypes (Stage 1), so this goes
+ * through the proxy like POs do. For bills Xero's web UI shows InvoiceNumber in its "Reference"
+ * column (the API's Reference field is for sales invoices), so callers set both.
+ * invoice: one Invoices[] item. idemKey: makes a retried request return the first bill.
+ */
+function xeroCreateBillInclusive(tenantId, invoice, idemKey, ctx) {
+  assertUuid_(invoice && invoice.Contact && invoice.Contact.ContactID, 'ContactID');
+  const item = Object.assign({}, invoice, { Type: 'ACCPAY', Status: 'DRAFT', LineAmountTypes: 'Inclusive' });
+  const res = xeroProxy_(tenantId, 'PUT', '/Invoices', { body: { Invoices: [item] }, headers: idemHeader_(idemKey) }, ctx);
+  const errs = xeroValidationMessages_(res.data);
+  const created = xeroFirst_(res.data || {}, 'Invoices', 'InvoiceID');
+  if (errs.length || !created || !created.InvoiceID) {
+    throw new AppError('XERO_VALIDATION', errs.join('; ') || 'Xero did not return the bill.', { upstream: 400 });
+  }
+  if (created.Type !== 'ACCPAY') throw new AppError('XERO_FAILED', 'Xero returned a ' + created.Type + ' instead of a bill.');
+  // Backstop, as for POs: never leave a bill with exclusive amounts if Xero ignored Inclusive.
+  if (created.LineAmountTypes !== 'Inclusive') {
+    const lines = (created.LineItems || []).map((li, i) => Object.assign({ LineItemID: li.LineItemID }, item.LineItems[i]));
+    const res2 = xeroProxy_(tenantId, 'POST', '/Invoices/' + created.InvoiceID, { body: { Invoices: [{ InvoiceID: created.InvoiceID, LineAmountTypes: 'Inclusive', LineItems: lines }] } }, ctx);
+    return xeroFirst_(res2.data || {}, 'Invoices', 'InvoiceID') || created;
+  }
+  return created;
+}
+
+/** A supplier's open bill with this InvoiceNumber, if one exists: how a lost create answer is found. */
+function xeroFindBillByNumber(tenantId, contactId, invoiceNumber, ctx) {
+  assertUuid_(contactId, 'ContactID');
+  const path = '/Invoices?ContactIDs=' + contactId + '&Statuses=DRAFT,SUBMITTED,AUTHORISED&where=' + encodeURIComponent('Type=="ACCPAY"');
+  const res = xeroProxy_(tenantId, 'GET', path, {}, ctx);
+  return xeroList_(res.data || {}, 'Invoices').filter(i => String(i.InvoiceNumber || '') === String(invoiceNumber))[0] || null;
+}
+
+function xeroGetInvoiceById(tenantId, invoiceId, ctx) {
+  assertUuid_(invoiceId, 'InvoiceID');
+  const res = xeroProxy_(tenantId, 'GET', '/Invoices/' + invoiceId, {}, ctx);
+  return xeroFirst_(res.data || {}, 'Invoices', 'InvoiceID');
+}
+
+function xeroAttachmentCall_(tenantId, entityType, entityId, fileName, base64, contentType, idemKey) {
+  if (ATTACHABLE.indexOf(entityType) === -1) throw new AppError('BAD_REQUEST', 'Attachments are only supported on PurchaseOrders and Invoices.');
+  assertUuid_(entityId, 'Record ID');
+  const name = String(fileName || 'slip.jpg').replace(/[^\w.\-]+/g, '_');
+  return xeroProxyCall_(tenantId, 'PUT', '/' + entityType + '/' + entityId + '/Attachments/' + encodeURIComponent(name), {
+    binaryBase64: base64, contentType: contentType || 'image/jpeg', headers: idemHeader_(idemKey),
+  });
+}
+
+function xeroHistoryCall_(tenantId, entityType, entityId, details, idemKey) {
+  if (ATTACHABLE.indexOf(entityType) === -1) throw new AppError('BAD_REQUEST', 'Unsupported record type.');
+  assertUuid_(entityId, 'Record ID');
+  return xeroProxyCall_(tenantId, 'PUT', '/' + entityType + '/' + entityId + '/History', {
+    body: { HistoryRecords: [{ Details: truncate_(details, 450) }] }, headers: idemHeader_(idemKey),
+  });
+}
+
+/** Sets a PO's status (BILLED after its bill is made), optionally moving it to another supplier. */
+function xeroPoUpdateCall_(tenantId, purchaseOrderId, status, contactId, idemKey) {
+  assertUuid_(purchaseOrderId, 'PurchaseOrderID');
+  if (['AUTHORISED', 'BILLED', 'DELETED'].indexOf(status) === -1) throw new AppError('BAD_REQUEST', 'Unsupported PO status ' + status + '.');
+  const po = { PurchaseOrderID: purchaseOrderId, Status: status };
+  if (contactId) po.Contact = { ContactID: assertUuid_(contactId, 'ContactID') };
+  return xeroProxyCall_(tenantId, 'POST', '/PurchaseOrders/' + purchaseOrderId, { body: { PurchaseOrders: [po] }, headers: idemHeader_(idemKey) });
 }
 
 /** Case-insensitive search over names (and other contact fields), archived contacts included. */

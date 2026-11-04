@@ -1,6 +1,7 @@
-// Check the slip (CLAUDE.md Flow 2 step 5): pre-filled and editable. Warnings are amber notes that
-// never block; fields Gemini was unsure of are outlined; the photo opens full screen to zoom.
-import { h, fill, alertBox, rand, handover, inputClass, labelClass, parseAmount } from './ui.js';
+// Check the slip and create the bill (CLAUDE.md Flow 2 steps 5–6): pre-filled and editable. Warnings
+// are amber notes that never block; fields Gemini was unsure of are outlined; the photo opens full
+// screen to zoom. Once sent to Xero the slip is shown read-only with the bill's state.
+import { h, fill, alertBox, rand, fmtDate, handover, inputClass, labelClass, parseAmount } from './ui.js';
 import { call } from '../api.js';
 
 // Same wording and rules as Main.gs slipFlags_ so the notes match what is stored with the bill.
@@ -65,7 +66,12 @@ export function render(root, ctx, params) {
   let dataUrl = null;
   const given = handover.get('slip:' + billId);
   handover.delete('slip:' + billId);
-  if (given && given.view) { view = given.view; dataUrl = given.dataUrl; build(); } else load(given && given.dataUrl);
+  if (given && given.view) { view = given.view; dataUrl = given.dataUrl; show(); } else load(given && given.dataUrl);
+
+  function show() {
+    if (view.bill && view.bill.billStatus) readOnly();
+    else build();
+  }
 
   async function load(knownUrl) {
     fill(root, h('p', { class: 'mt-6 text-center text-slate-500' }, 'Loading the slip…'));
@@ -74,7 +80,7 @@ export function render(root, ctx, params) {
       if (!alive) return;
       view = v;
       dataUrl = knownUrl || (v.image ? `data:${v.image.mimeType};base64,${v.image.base64}` : null);
-      build();
+      show();
     } catch (err) {
       if (alive && err.code !== 'AUTH_REQUIRED') fill(root, alertBox(err.message), h('a', { href: '#/slips', class: 'mt-4 block text-center font-medium text-brand' }, 'Back'));
     }
@@ -140,6 +146,35 @@ export function render(root, ctx, params) {
 
     // --- live notes ---
     const flagsBox = h('div', { class: 'mt-4 space-y-2', 'aria-live': 'polite' });
+
+    // --- which supplier, when the slip names another one (asked before anything goes to Xero) ---
+    let suppliers = [];
+    ctx.auth.refData(po.entityId).then((d) => { suppliers = d.suppliers || []; shownFor = null; if (alive) updateLive(); }).catch(() => {});
+    let choice = null;          // { key, mode: 'keep' | 'existing' | 'new', contactId? }
+    let shownFor = null;
+    const choiceBox = h('fieldset', { class: 'mt-6' });
+    function renderChoice(slipName) {
+      const name = slipName.trim();
+      if (name === shownFor) return;
+      shownFor = name;
+      if (!name || namesMatch(name, po.supplierName)) { choice = null; choiceBox.replaceChildren(); return; }
+      const norm = (x) => String(x).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      const near = suppliers.filter((x) => x.name !== po.supplierName && namesMatch(name, x.name)).slice(0, 3);
+      const options = [{ key: 'keep', mode: 'keep', label: `Keep ${po.supplierName}`, sub: 'The PO’s supplier' }]
+        .concat(near.map((x) => ({ key: 'c:' + x.contactId, mode: 'existing', contactId: x.contactId, label: `Change to ${x.name}`, sub: 'Already a supplier in Xero' })));
+      if (!near.some((x) => norm(x.name) === norm(name))) options.push({ key: 'new', mode: 'new', label: `Change to “${name}”`, sub: 'Added to Xero as a supplier if it isn’t there yet' });
+      if (choice && !options.some((o) => o.key === choice.key)) choice = null;
+      fill(choiceBox,
+        h('legend', { class: 'text-lg font-semibold' }, 'Which supplier is this bill for?'),
+        h('p', { class: 'text-sm text-slate-600' }, `The slip says “${name}”; the PO is for ${po.supplierName}.`),
+        ...options.map((o) => {
+          const radio = h('input', { type: 'radio', name: 'bill-supplier', value: o.key, class: 'mt-1 h-5 w-5 shrink-0 accent-brand' });
+          radio.checked = !!choice && choice.key === o.key;
+          radio.addEventListener('change', () => { choice = { key: o.key, mode: o.mode, contactId: o.contactId }; });
+          return h('label', { class: 'mt-2 flex items-start gap-3 rounded-xl bg-white p-3 ring-1 ring-slate-200 active:bg-slate-50' }, radio,
+            h('span', { class: 'min-w-0' }, h('span', { class: 'block font-medium' }, o.label), h('span', { class: 'block text-sm text-slate-500' }, o.sub)));
+        }));
+    }
     const values = () => ({
       supplierName: inp.supplierName.value, supplierVatNumber: inp.supplierVatNumber.value, slipNumber: inp.slipNumber.value,
       date: inp.date.value, totalIncl: total.el.value, vatAmount: vat.el.value === '' ? null : vat.el.value,
@@ -159,6 +194,7 @@ export function render(root, ctx, params) {
       } else linesSum.textContent = '';
       const notes = liveFlags(po, v, view.thresholds).concat(serverDup);
       fill(flagsBox, ...notes.map((n) => alertBox(n, 'warn')));
+      renderChoice(v.supplierName);
     }
     [inp.supplierName, inp.supplierVatNumber, inp.date, total.el, vat.el].forEach((el) => el.addEventListener('input', updateLive));
 
@@ -169,7 +205,7 @@ export function render(root, ctx, params) {
         h('p', { class: 'mt-1' }, view.reason || 'The slip couldn’t be read automatically.'),
         h('button', { type: 'button', class: 'mt-3 rounded-xl border-2 border-sky-300 bg-white px-4 py-2 font-semibold active:bg-sky-100', onclick: readAgain }, 'Try reading again'))
       : view.status === 'reviewed'
-        ? h('div', { class: 'mt-2 rounded-2xl bg-green-50 p-4 text-green-900 ring-1 ring-green-200', role: 'status' }, h('p', { class: 'font-semibold' }, 'Saved. You can still correct it until the bill is made.'))
+        ? h('div', { class: 'mt-2 rounded-2xl bg-white p-4 ring-1 ring-slate-200', role: 'status' }, h('p', { class: 'font-semibold' }, 'Checked earlier, not sent to Xero yet'), h('p', { class: 'mt-1 text-slate-600' }, 'Check it once more, then create the bill.'))
         : h('div', { class: 'mt-2 rounded-2xl bg-white p-4 ring-1 ring-slate-200', role: 'status' },
           h('p', { class: 'font-semibold' }, 'Read from the photo'),
           h('p', { class: 'mt-1 text-slate-600' }, low.size ? 'Check every value against the slip, especially the outlined ones.' : 'Check every value against the slip.'));
@@ -196,28 +232,34 @@ export function render(root, ctx, params) {
       : null;
 
     const message = h('div', { class: 'mt-4', 'aria-live': 'polite' });
-    const save = h('button', { type: 'button', class: 'mt-6 w-full rounded-2xl bg-brand px-4 py-4 text-lg font-semibold text-white touch-manipulation active:opacity-90 disabled:opacity-60' }, 'Save slip details');
+    const LABEL = 'Create the bill in Xero';
+    const save = h('button', { type: 'button', class: 'mt-6 w-full rounded-2xl bg-brand px-4 py-4 text-lg font-semibold text-white touch-manipulation active:opacity-90 disabled:opacity-60' }, LABEL);
     save.addEventListener('click', async () => {
       if (save.disabled) return;
       const v = values();
       if (!v.date) { message.replaceChildren(alertBox('Enter the date on the slip.')); inp.date.focus(); return; }
       if (!(parseAmount(v.totalIncl) > 0)) { message.replaceChildren(alertBox('Enter the slip total including VAT.')); total.el.focus(); return; }
+      const asked = choiceBox.childElementCount > 0;
+      if (asked && !choice) { message.replaceChildren(alertBox('Choose which supplier the bill is for.')); choiceBox.scrollIntoView({ block: 'center' }); return; }
       save.disabled = true;
-      save.textContent = 'Saving…';
+      save.textContent = 'Creating the bill…';
       message.replaceChildren();
       try {
-        const r = await call('saveSlipReview', { billId, fields: v });
-        if (alive) saved(r);
+        const r = await call('submitBill', { billId, fields: v, supplier: asked ? { mode: choice.mode, contactId: choice.contactId } : undefined }, { timeoutMs: 90000 });
+        if (alive) done(r);
       } catch (err) {
         save.disabled = false;
-        save.textContent = 'Save slip details';
-        if (err.code !== 'AUTH_REQUIRED') message.replaceChildren(alertBox(err.message));
+        save.textContent = LABEL;
+        if (err.code === 'TIMEOUT') message.replaceChildren(alertBox('PO Desk is still working on it. Open the PO in a minute to see the bill; tapping again won’t make a second one.', 'warn'));
+        else if (err.code === 'SUPPLIER_CHOICE') { shownFor = null; renderChoice(inp.supplierName.value); message.replaceChildren(alertBox(err.message)); }
+        else if (err.code !== 'AUTH_REQUIRED') message.replaceChildren(alertBox(err.message));
       }
     });
 
     fill(root,
       h('h1', { class: 'mt-2 text-2xl font-bold' }, 'Check the slip'),
       h('p', { class: 'mt-1 text-slate-600' }, `${po.poNumber} · ${po.supplierName} · PO amount ${rand(po.amountInclZar)}`),
+      view.bill && view.bill.rejected ? h('div', { class: 'mt-2' }, alertBox(`Xero didn’t accept the bill: ${view.bill.rejected} Correct the details and tap “${LABEL}” again.`)) : null,
       banner,
       photo,
       (view.checks || []).length ? h('div', { class: 'mt-4 space-y-2' }, view.checks.map((c) => alertBox(c.message, 'warn'))) : null,
@@ -229,6 +271,7 @@ export function render(root, ctx, params) {
       field('totalIncl', 'Total including VAT', total),
       field('vatAmount', 'VAT on the slip', vat, vatHint),
       linesToggle, linesBox, linesSum,
+      choiceBox,
       message,
       save,
       h('a', { href: '#/po/' + po.poId, class: 'mt-3 block py-3 text-center text-base font-medium text-slate-600' }, 'Back to the PO'),
@@ -236,18 +279,74 @@ export function render(root, ctx, params) {
     renderLines();
   }
 
-  function saved(r) {
+  // After Create the bill: what happened in Xero, in plain words.
+  function done(r) {
     fill(root,
-      h('div', { class: 'mt-2 rounded-2xl bg-green-50 p-4 text-green-900 ring-1 ring-green-200', role: 'status' },
-        h('p', { class: 'text-xl font-bold' }, 'Slip saved'),
-        h('p', { class: 'mt-1' }, `${view.po.poNumber}: the photo and details are stored. The draft bill in Xero is created in the next stage of the build.`)),
-      r.flags.length ? h('div', { class: 'mt-4 space-y-2' }, h('p', { class: 'font-medium' }, 'Noted with the bill:'), r.flags.map((x) => alertBox(x.message, 'warn'))) : null,
-      h('div', { class: 'mt-6 grid grid-cols-2 gap-3' },
-        h('button', { type: 'button', class: 'rounded-2xl bg-brand px-4 py-4 text-base font-semibold text-white', onclick: () => ctx.go('/po/' + view.po.poId) }, 'Back to the PO'),
-        h('button', { type: 'button', class: 'rounded-2xl border-2 border-slate-300 bg-white px-4 py-4 text-base font-semibold', onclick: () => ctx.go('/home') }, 'Home')));
+      billCard(r, view.po.poNumber),
+      r.duplicate ? h('p', { class: 'mt-3 text-slate-600' }, 'This slip had already been sent; nothing new was created in Xero.') : null,
+      (r.flags || []).length ? h('div', { class: 'mt-4 space-y-2' }, h('p', { class: 'font-medium' }, 'Noted with the bill:'), r.flags.map((x) => alertBox(x.message, 'warn'))) : null,
+      driveLink(r.slipUrl),
+      navButtons());
+  }
+
+  // A slip already sent to Xero: its bill, the photo and the values as sent. Nothing editable.
+  function readOnly() {
+    const f = view.fields;
+    const row = (k, v) => [h('dt', { class: 'text-sm text-slate-500' }, k), h('dd', { class: 'mb-3 text-base text-slate-900' }, v)];
+    fill(root,
+      h('h1', { class: 'mt-2 text-2xl font-bold' }, 'Slip and bill'),
+      h('p', { class: 'mt-1 text-slate-600' }, `${view.po.poNumber} · PO amount ${rand(view.po.amountInclZar)}`),
+      billCard(view.bill, view.po.poNumber),
+      dataUrl ? h('button', { type: 'button', class: 'mt-4 block w-full overflow-hidden rounded-2xl bg-slate-100 ring-1 ring-slate-200', 'aria-label': 'Open the photo full screen', onclick: () => openZoom(dataUrl) },
+        h('img', { src: dataUrl, alt: 'Slip photo', class: 'max-h-72 w-full object-contain' }),
+        h('span', { class: 'block py-1.5 text-center text-sm text-slate-600' }, 'Tap to zoom')) : null,
+      h('dl', { class: 'mt-4 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200' },
+        row('Supplier on the slip', f.supplierName || '—'),
+        row('Supplier VAT number', f.supplierVatNumber || 'None'),
+        row('Slip number', f.slipNumber || '—'),
+        row('Date on the slip', f.date ? fmtDate(f.date + 'T12:00:00+02:00') : '—'),
+        row('Total incl. VAT', f.totalIncl === null || f.totalIncl === undefined ? '—' : rand(f.totalIncl)),
+        row('VAT on the slip', f.vatAmount === null || f.vatAmount === undefined ? '—' : rand(f.vatAmount))),
+      driveLink(view.bill.slipUrl),
+      navButtons());
+  }
+
+  function navButtons() {
+    return h('div', { class: 'mt-6 grid grid-cols-2 gap-3' },
+      h('button', { type: 'button', class: 'rounded-2xl bg-brand px-4 py-4 text-base font-semibold text-white', onclick: () => ctx.go('/po/' + view.po.poId) }, 'Back to the PO'),
+      h('button', { type: 'button', class: 'rounded-2xl border-2 border-slate-300 bg-white px-4 py-4 text-base font-semibold', onclick: () => ctx.go('/home') }, 'Home'));
   }
 
   return () => { alive = false; closeZoom(); };
+}
+
+const STEP_TEXT = { bill: 'creating the bill', attachBill: 'attaching the slip to the bill', attachPO: 'attaching the slip to the PO', poBilled: 'marking the PO billed' };
+
+/** The bill's state: made, still finishing off, or waiting for Xero. b: billView_ fields from the server. */
+export function billCard(b, poNumber) {
+  const left = (b.pending || []).map((k) => STEP_TEXT[k]).filter(Boolean);
+  const [tone, title, text] = b.billStatus === 'BILLED'
+    ? ['bg-green-50 text-green-900 ring-green-200', 'Draft bill in Xero ✓', `The slip is attached to the bill and to ${poNumber}, and the PO is marked billed.`]
+    : b.invoiceCreated
+      ? ['bg-sky-50 text-sky-950 ring-sky-200', 'Bill made in Xero; finishing off', `Still to do: ${left.join(', ') || 'a last check'}. PO Desk finishes this by itself within a few minutes.`]
+      : ['bg-sky-50 text-sky-950 ring-sky-200', 'Waiting for Xero', 'Xero isn’t answering right now. The slip and details are saved; PO Desk creates the bill by itself as soon as Xero answers.'];
+  const row = (k, v) => [h('dt', { class: 'text-sm opacity-75' }, k), h('dd', { class: 'mb-2 font-medium' }, v)];
+  return h('div', { class: `mt-4 rounded-2xl p-4 ring-1 ${tone}`, role: 'status' },
+    h('p', { class: 'text-xl font-bold' }, title),
+    h('p', { class: 'mt-1' }, text),
+    b.billRef || b.xeroTotal !== null ? h('dl', { class: 'mt-3' },
+      b.billRef ? row('Reference in Xero', b.billRef) : null,
+      b.xeroTotal !== null && b.xeroTotal !== undefined ? row('Bill total', rand(b.xeroTotal) + (b.xeroVat !== null && b.xeroVat !== undefined ? ` · VAT ${rand(b.xeroVat)}` : '')) : null,
+      b.billSupplier ? row('Supplier', b.billSupplier + (b.supplierChanged ? ' (changed from the PO’s)' : '')) : null) : null,
+    b.vatMatches === false ? h('p', { class: 'mt-2 font-medium' }, 'Xero’s VAT differs from the slip; your PO Desk admin will check it.') : null);
+}
+
+/** "View slip" opens the photo in Google Drive. It is not shared, so only PO Desk's own account can open it. */
+export function driveLink(url) {
+  if (!url) return null;
+  return h('div', { class: 'mt-4 text-center' },
+    h('a', { href: url, target: '_blank', rel: 'noopener', class: 'inline-block py-2 text-base font-semibold text-brand underline' }, 'View slip in Google Drive'),
+    h('p', { class: 'text-sm text-slate-500' }, 'Opens for PO Desk’s own Google account only.'));
 }
 
 // --- full-screen zoom: buttons and double-tap zoom; drag/scroll to pan ---
