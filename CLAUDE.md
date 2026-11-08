@@ -20,9 +20,9 @@ The same Composio connection also reaches Nandrea Health Products (tenant e775d9
 - Database: Google Sheet "PO Desk DB"; each tab is a table (see Data model).
 - Files: Google Drive folder "PO Desk" via DriveApp.
 - Xero: only through Composio's REST API, called from Apps Script with UrlFetchApp.
-- Slip reading: Gemini API free tier via UrlFetchApp; model name lives in Config. Decided 4 Nov 2026: the free tier's data-use terms (Google may use what is sent, including slip images, to improve its products) are accepted.
+- Slip reading: Gemini API via UrlFetchApp; model name lives in Config. Decided 8 Nov 2026: the paid tier (the API key's Google Cloud project linked to a billing account, pay per use), because the free tier's ~20 reads a day on 3.6 Flash ran out. Model stays gemini-3.6-flash with Google's default thinking level (no thinkingConfig sent): the user chose its speed and accuracy over Flash-Lite or minimal thinking. Roughly R40 a month at ~330 slips, about double from 1 Jan 2027 when Google's price rises. On the paid tier Google does not use slips to improve its products.
 - Email: MailApp for approvals and notifications.
-- Never call Composio or Gemini from the browser. No Supabase, no Cloudflare Workers, no paid services.
+- Never call Composio or Gemini from the browser. No Supabase, no Cloudflare Workers, no paid services (the Gemini paid tier above is the one agreed exception).
 
 ## Network contract
 - /frontend/src/config.js exports API_URL = 'https://script.google.com/macros/s/DEPLOYMENT_ID/exec' and APP_VERSION. Nothing else is configured in the frontend.
