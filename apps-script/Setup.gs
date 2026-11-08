@@ -195,8 +195,12 @@ const CATEGORY_PROPOSALS = Object.freeze([
   { sort: 40, name: 'Raw materials', code: '313', keywords: 'raw material, raw materials, ingredient, ingredients, bulk powder', note: 'HPB and PK also have 318 Plant Raw Materials (defaults to old 14% VAT).' },
   { sort: 50, name: 'Packaging', code: '311', keywords: 'packaging, carton, cartons, box, boxes, bottle, bottles, jar, jars, lids, caps, sachet, sachets, bubble wrap, packing tape, shrink wrap, pallet wrap' },
   { sort: 60, name: 'Labels', code: '310', keywords: 'label, labels, sticker, stickers, barcode, barcodes, label roll' },
-  { sort: 70, name: 'Cleaning', code: '404', keywords: 'cleaning, detergent, bleach, jik, sanitiser, sanitizer, disinfectant, soap, mop, broom, handy andy, dishwashing, toilet paper, refuse bags, bin bags' },
-  { sort: 80, name: 'Protective clothing (PPE)', code: '421', keywords: 'ppe, gloves, nitrile gloves, overalls, safety boots, gumboots, hairnet, hairnets, face mask, masks, goggles, lab coat, apron, hard hat' },
+  // Premises and office cleaning. Soap used in production equipment is a factory consumable (below);
+  // keyword scoring prefers the longer phrase, so "machine soap" beats "soap".
+  { sort: 70, name: 'Cleaning', code: '404', keywords: 'cleaning, detergent, bleach, jik, sanitiser, sanitizer, disinfectant, hand soap, soap, mop, broom, handy andy, dishwashing, toilet paper, refuse bags, bin bags' },
+  { sort: 80, name: 'Protective clothing (PPE)', code: '421', keywords: 'ppe, overalls, safety boots, gumboots, goggles, lab coat, apron, hard hat, face shield' },
+  // 306 is a direct cost (cost of sales): things used up in production (decided 8 Nov 2026).
+  { sort: 85, name: 'Factory consumables', code: '306', keywords: 'gloves, nitrile gloves, disposable gloves, hairnet, hairnets, shoe covers, beard covers, face mask, face masks, masks, machine soap, equipment soap, cip detergent' },
   { sort: 90, name: 'Repairs: building', code: '422', keywords: 'plumber, plumbing, paint, cement, light bulb, globe, globes, tap, padlock, lock, door handle, hardware, builders, silicone' },
   { sort: 100, name: 'Repairs: machinery', code: '423', keywords: 'bearing, bearings, v-belt, drive belt, motor, pump, spares, spare parts, welding, gasket, o-ring, seal, fittings, grease' },
   // 306 Consumables - Factory is a direct cost (cost of sales) for things used up in production, so
@@ -212,7 +216,15 @@ const CATEGORY_PROPOSALS = Object.freeze([
  * are never touched, so your corrections survive a re-run) and prints the mapping for review.
  * Run syncAll() first: codes are checked against the synced Accounts tab.
  */
-function proposeCategories() {
+function proposeCategories() { proposeCategories_(false); }
+
+/**
+ * Like proposeCategories, but also brings rows that are NOT switched on yet in line with the current
+ * proposals (account code, keywords, order). Switched-on rows are the accountant's: never touched.
+ */
+function updateCategoryProposals() { proposeCategories_(true); }
+
+function proposeCategories_(updateInactive) {
   const purchase = ['EXPENSE', 'DIRECTCOSTS', 'OVERHEADS'];
   const accounts = readTable('Accounts').rows;
   const existing = readTable('Categories').rows;
@@ -225,6 +237,12 @@ function proposeCategories() {
       const acct = chart[p.code];
       const ok = acct && acct.status === 'ACTIVE' && acct.class === 'EXPENSE' && purchase.indexOf(acct.type) !== -1;
       const already = existing.find(c => c.entity_id === e.entity_id && String(c.name).toLowerCase() === p.name.toLowerCase());
+      let updated = '';
+      if (already && updateInactive && !isTrue_(already.active)) {
+        const want = { account_code: ok ? p.code : '', keywords: p.keywords, sort: p.sort };
+        const diff = Object.keys(want).filter(k => String(already[k]) !== String(want[k]));
+        if (diff.length) { updateRowById('Categories', 'category_id', already.category_id, want); updated = 'updated ' + diff.join(', '); }
+      }
       if (!already) {
         appendRow('Categories', {
           category_id: Utilities.getUuid(), entity_id: e.entity_id, name: p.name,
@@ -235,7 +253,7 @@ function proposeCategories() {
       return {
         sort: p.sort, category: p.name, code: ok ? p.code : '(none)', account: acct ? acct.name : 'NOT IN CHART',
         type: acct ? acct.type : '-', defaultTax: acct ? acct.tax_type : '-',
-        row: already ? 'kept existing (' + (already.account_code || 'blank') + ', active=' + already.active + ')' : 'added, inactive',
+        row: updated || (already ? 'kept existing (' + (already.account_code || 'blank') + ', active=' + already.active + ')' : 'added, inactive'),
         note: (ok ? '' : 'CODE ' + p.code + ' NOT A VALID PURCHASE ACCOUNT HERE. ') + (p.note || ''),
       };
     });
