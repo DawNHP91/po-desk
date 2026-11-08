@@ -119,28 +119,77 @@ export function render(root, ctx, params) {
       return wrap;
     };
 
-    // --- line items ---
-    let lines = (f.lineItems || []).map((li) => ({ description: li.description, qty: li.qty, lineTotalIncl: li.lineTotalIncl }));
+    // --- line items, each with the account it goes to on the bill (one bill line per account) ---
+    const poAccount = po.accountCode || '';
+    let accounts = [];   // this company's purchase accounts (refData), for the account pickers
+    let lines = (f.lineItems || []).map((li) => ({ description: li.description, qty: li.qty, lineTotalIncl: li.lineTotalIncl, accountCode: li.accountCode || poAccount, picked: false }));
     const linesBox = h('div', { class: 'mt-2 space-y-2' });
     const linesSum = h('p', { class: 'mt-2 text-sm' });
-    const linesOpen = { on: low.has('lineItems') };
+    const splitBox = h('div', { class: 'mt-2 space-y-2', 'aria-live': 'polite' });
+    const priced = () => lines.filter((li) => !Number.isNaN(parseAmount(li.lineTotalIncl)));
+    const accountsUsed = () => [...new Set(priced().map((li) => li.accountCode || poAccount))];
+    const linesOpen = { on: low.has('lineItems') || accountsUsed().length > 1 };
+    const acctLabel = (code) => {
+      const a = accounts.find((x) => x.code === code);
+      return code + (a ? ' ' + a.name : code === poAccount && po.accountName ? ' ' + po.accountName : '');
+    };
+    function accountSelect(li, i) {
+      const sel = h('select', { class: 'mt-2 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm', 'aria-label': `Line ${i + 1} account` });
+      const codes = accounts.map((a) => a.code);
+      [li.accountCode || poAccount, poAccount].forEach((c) => { if (c && !codes.includes(c)) codes.unshift(c); });
+      codes.forEach((c) => sel.append(h('option', { value: c }, acctLabel(c) + (c === poAccount ? ' (the PO’s account)' : ''))));
+      sel.value = li.accountCode || poAccount;
+      sel.addEventListener('change', () => { li.accountCode = sel.value; li.picked = true; updateLive(); });
+      li.sel = sel;
+      return sel;
+    }
+    // A typed item gets its own suggestion (keyword rules or learned words), unless the buyer picked one.
+    const timers = new Map();
+    function suggestFor(li) {
+      clearTimeout(timers.get(li));
+      if (li.picked || !String(li.description || '').trim()) return;
+      timers.set(li, setTimeout(async () => {
+        try {
+          const sug = await call('suggest', { entityId: po.entityId, contactId: '', description: li.description });
+          if (!alive || li.picked) return;
+          li.accountCode = ['keyword', 'words', 'borrowed'].includes(sug.source) && sug.accountCode ? sug.accountCode : poAccount;
+          if (li.sel) {
+            if (![...li.sel.options].some((o) => o.value === li.accountCode)) li.sel.append(h('option', { value: li.accountCode }, acctLabel(li.accountCode)));
+            li.sel.value = li.accountCode;
+          }
+          updateLive();
+        } catch { /* keep the account it had */ }
+      }, 700));
+    }
+    function oneAccount() {
+      lines.forEach((li) => { li.accountCode = poAccount; li.picked = true; });
+      renderLines();
+    }
     const linesToggle = h('button', { type: 'button', class: 'mt-6 flex w-full items-center justify-between rounded-xl bg-white px-4 py-3 text-left text-base font-medium ring-1 ring-slate-200' + (low.has('lineItems') ? ' ring-2 ring-amber-400' : ''), onclick: () => { linesOpen.on = !linesOpen.on; renderLines(); } });
     function renderLines() {
       linesToggle.replaceChildren(h('span', {}, `Items on the slip (${lines.length})` + (low.has('lineItems') ? ' · check these' : '')), h('span', { 'aria-hidden': 'true' }, linesOpen.on ? '▲' : '▼'));
       if (!linesOpen.on) { linesBox.replaceChildren(); updateLive(); return; }
       fill(linesBox, ...lines.map((li, i) => {
-        const d = h('input', { class: 'min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-base', 'aria-label': `Line ${i + 1} description` });
+        const d = h('input', { class: 'block w-full rounded-lg border border-slate-300 px-3 py-2 text-base', 'aria-label': `Line ${i + 1} description` });
         d.value = li.description || '';
         const q = h('input', { class: 'w-16 rounded-lg border border-slate-300 px-2 py-2 text-base', inputmode: 'decimal', 'aria-label': `Line ${i + 1} quantity` });
         q.value = li.qty === null || li.qty === undefined ? '1' : String(li.qty);
         const a = h('input', { class: 'w-24 rounded-lg border border-slate-300 px-2 py-2 text-right text-base', inputmode: 'decimal', 'aria-label': `Line ${i + 1} amount` });
-        a.value = li.lineTotalIncl === null || li.lineTotalIncl === undefined ? '' : Number(li.lineTotalIncl).toFixed(2);
-        d.addEventListener('input', () => { li.description = d.value; });
+        // A new item's amount starts empty, not "0.00" (typing into "0.00" gave "200.00").
+        a.value = li.lineTotalIncl === null || li.lineTotalIncl === undefined || li.lineTotalIncl === '' ? '' : Number(li.lineTotalIncl).toFixed(2);
+        a.placeholder = '0.00';
+        d.addEventListener('input', () => { li.description = d.value; suggestFor(li); });
         q.addEventListener('input', () => { li.qty = q.value; });
         a.addEventListener('input', () => { li.lineTotalIncl = a.value; updateLive(); });
-        return h('div', { class: 'flex items-center gap-2' }, d, q, a,
-          h('button', { type: 'button', class: 'rounded-lg px-2 py-2 text-slate-500 active:bg-slate-100', 'aria-label': `Remove line ${i + 1}`, onclick: () => { lines.splice(i, 1); renderLines(); } }, '✕'));
-      }), h('button', { type: 'button', class: 'rounded-lg px-3 py-2 text-base font-medium text-brand active:bg-slate-100', onclick: () => { lines.push({ description: '', qty: 1, lineTotalIncl: '' }); renderLines(); } }, '+ Add a line'));
+        // Phone width: the item's name gets its own row; quantity, amount and remove below; then its account.
+        return h('div', { class: 'rounded-xl bg-white p-2 ring-1 ring-slate-200' },
+          d,
+          h('div', { class: 'mt-2 flex items-center gap-2' },
+            h('span', { class: 'text-sm text-slate-500' }, 'Qty'), q,
+            h('span', { class: 'ml-auto text-sm text-slate-500' }, 'R'), a,
+            h('button', { type: 'button', class: 'rounded-lg px-2 py-2 text-slate-500 active:bg-slate-100', 'aria-label': `Remove line ${i + 1}`, onclick: () => { lines.splice(i, 1); renderLines(); } }, '✕')),
+          accountSelect(li, i));
+      }), h('button', { type: 'button', class: 'rounded-lg px-3 py-2 text-base font-medium text-brand active:bg-slate-100', onclick: () => { lines.push({ description: '', qty: 1, lineTotalIncl: '', accountCode: poAccount, picked: false }); renderLines(); } }, '+ Add a line'));
       updateLive();
     }
 
@@ -149,7 +198,14 @@ export function render(root, ctx, params) {
 
     // --- which supplier, when the slip names another one (asked before anything goes to Xero) ---
     let suppliers = [];
-    ctx.auth.refData(po.entityId).then((d) => { suppliers = d.suppliers || []; shownFor = null; if (alive) updateLive(); }).catch(() => {});
+    ctx.auth.refData(po.entityId).then((d) => {
+      suppliers = d.suppliers || [];
+      accounts = d.accounts || [];
+      shownFor = null;
+      if (!alive) return;
+      // Fill the account pickers' names, unless the buyer is typing in an item right now.
+      if (linesOpen.on && !linesBox.contains(document.activeElement)) renderLines(); else updateLive();
+    }).catch(() => {});
     let choice = null;          // { key, mode: 'keep' | 'existing' | 'new', contactId? }
     let shownFor = null;
     const choiceBox = h('fieldset', { class: 'mt-6' });
@@ -179,8 +235,18 @@ export function render(root, ctx, params) {
       supplierName: inp.supplierName.value, supplierVatNumber: inp.supplierVatNumber.value, slipNumber: inp.slipNumber.value,
       date: inp.date.value, totalIncl: total.el.value, vatAmount: vat.el.value === '' ? null : vat.el.value,
       paymentMethodHint: f.paymentMethodHint || '',
-      lineItems: lines.filter((li) => String(li.description || '').trim() || String(li.lineTotalIncl ?? '').trim() !== ''),
+      lineItems: lines.filter((li) => String(li.description || '').trim() || String(li.lineTotalIncl ?? '').trim() !== '')
+        .map((li) => ({ description: li.description, qty: li.qty, lineTotalIncl: li.lineTotalIncl, accountCode: li.accountCode || poAccount })),
     });
+    // Items on several accounts must add up to the total exactly, or the slip can't be split.
+    const splitState = () => {
+      const t = parseAmount(total.el.value);
+      // A Map keeps the slip's order (object keys like "426" would sort numerically), as on the bill.
+      const by = new Map();
+      priced().forEach((li) => { const c = li.accountCode || poAccount; by.set(c, Math.round(((by.get(c) || 0) + parseAmount(li.lineTotalIncl)) * 100) / 100); });
+      const sum = Math.round([...by.values()].reduce((x, y) => x + y, 0) * 100) / 100;
+      return { by, codes: [...by.keys()], sum, t, addsUp: t > 0 && Math.abs(sum - t) < 0.005 };
+    };
     function updateLive() {
       const v = values();
       const t = parseAmount(v.totalIncl);
@@ -192,6 +258,14 @@ export function render(root, ctx, params) {
         linesSum.className = 'mt-2 text-sm ' + (off ? 'font-medium text-amber-800' : 'text-slate-500');
         linesSum.textContent = `Items add up to ${rand(sum)}` + (off ? `, not the total ${rand(t)}.` : '.');
       } else linesSum.textContent = '';
+      const sp = splitState();
+      if (sp.codes.length > 1 && sp.addsUp) {
+        fill(splitBox, h('p', { class: 'rounded-xl bg-sky-50 p-3 text-sky-950 ring-1 ring-sky-200' },
+          `This slip goes to ${sp.codes.length} accounts: ` + sp.codes.map((c) => `${acctLabel(c)} ${rand(sp.by.get(c))}`).join(' · ') + '.'));
+      } else if (sp.codes.length > 1) {
+        fill(splitBox, alertBox(`The items are on ${sp.codes.length} accounts but add up to ${rand(sp.sum)}, not the total ${rand(sp.t || 0)}. Correct the amounts, or put the whole slip on one account.`, 'warn'),
+          h('button', { type: 'button', class: 'w-full rounded-xl border-2 border-slate-300 bg-white px-4 py-3 text-base font-semibold active:bg-slate-100', onclick: oneAccount }, `Put the whole slip on ${acctLabel(poAccount)}`));
+      } else splitBox.replaceChildren();
       const notes = liveFlags(po, v, view.thresholds).concat(serverDup);
       fill(flagsBox, ...notes.map((n) => alertBox(n, 'warn')));
       renderChoice(v.supplierName);
@@ -241,6 +315,8 @@ export function render(root, ctx, params) {
       const v = values();
       if (!v.date) { message.replaceChildren(alertBox('Enter the date on the slip.')); inp.date.focus(); return; }
       if (!(parseAmount(v.totalIncl) > 0)) { message.replaceChildren(alertBox('Enter the slip total including VAT.')); total.el.focus(); return; }
+      const sp = splitState();
+      if (sp.codes.length > 1 && !sp.addsUp) { message.replaceChildren(alertBox('The items on different accounts must add up to the total. Correct the amounts, or put the whole slip on one account.')); splitBox.scrollIntoView({ block: 'center' }); return; }
       const asked = choiceBox.childElementCount > 0;
       if (asked && !choice) { message.replaceChildren(alertBox('Choose which supplier the bill is for.')); choiceBox.scrollIntoView({ block: 'center' }); return; }
       save.disabled = true;
@@ -273,7 +349,7 @@ export function render(root, ctx, params) {
       field('date', 'Date on the slip', inp.date),
       field('totalIncl', 'Total including VAT', total),
       field('vatAmount', 'VAT on the slip', vat, vatHint),
-      linesToggle, linesBox, linesSum,
+      linesToggle, linesBox, linesSum, splitBox,
       choiceBox,
       message,
       save,
@@ -309,9 +385,17 @@ export function render(root, ctx, params) {
         row('Slip number', f.slipNumber || '—'),
         row('Date on the slip', f.date ? fmtDate(f.date + 'T12:00:00+02:00') : '—'),
         row('Total incl. VAT', f.totalIncl === null || f.totalIncl === undefined ? '—' : rand(f.totalIncl)),
-        row('VAT on the slip', f.vatAmount === null || f.vatAmount === undefined ? '—' : rand(f.vatAmount))),
+        row('VAT on the slip', f.vatAmount === null || f.vatAmount === undefined ? '—' : rand(f.vatAmount)),
+        splitRow(f, row)),
       driveLink(view.bill.slipUrl),
       navButtons());
+  }
+
+  // The accounts a split slip went to, e.g. "426: R95.00 · 404: R85.00" (nothing for a one-account slip).
+  function splitRow(f, row) {
+    const by = new Map();
+    (f.lineItems || []).forEach((li) => { if (li.accountCode) by.set(li.accountCode, Math.round(((by.get(li.accountCode) || 0) + Number(li.lineTotalIncl || 0)) * 100) / 100); });
+    return by.size > 1 ? row('Accounts on the bill', [...by.keys()].map((c) => `${c}: ${rand(by.get(c))}`).join(' · ')) : null;
   }
 
   function navButtons() {

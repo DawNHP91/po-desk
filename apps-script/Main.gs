@@ -645,9 +645,12 @@ function slipView_(bill, po, stored, reviewed) {
     fields = { supplierName: String(po.supplier_name), supplierVatNumber: known && /^4\d{9}$/.test(String(known.vat_number)) ? String(known.vat_number) : '',
       slipNumber: '', date: '', currency: 'ZAR', lineItems: [], subtotalExcl: null, vatAmount: null, totalIncl: null, paymentMethodHint: '' };
   }
+  if (!reviewed && !manual && (fields.lineItems || []).length) fields = Object.assign({}, fields, { lineItems: itemAccounts_(po, fields.lineItems) });
+  const poAcct = getRefData(po.entity_id).accounts.find(a => String(a.code) === String(po.account_code));
   return {
     billId: bill.bill_id,
-    po: { poId: po.po_id, poNumber: String(po.po_number), supplierName: String(po.supplier_name), amountInclZar: Number(po.amount_incl_zar), createdAt: po.created_at instanceof Date ? po.created_at.toISOString() : String(po.created_at), entityId: po.entity_id },
+    po: { poId: po.po_id, poNumber: String(po.po_number), supplierName: String(po.supplier_name), amountInclZar: Number(po.amount_incl_zar), createdAt: po.created_at instanceof Date ? po.created_at.toISOString() : String(po.created_at), entityId: po.entity_id,
+      accountCode: String(po.account_code), accountName: poAcct ? String(poAcct.name) : '' },
     status: reviewed ? 'reviewed' : (stored.status || 'manual'),
     reason: stored.reason || (stored.status ? '' : 'The slip hasn’t been read yet.'),
     fields: fields,
@@ -702,7 +705,9 @@ function validateSlipFields_(f) {
     if (qty !== null && (isNaN(qty) || qty <= 0 || qty > 100000)) bad('Line ' + (i + 1) + ' has an invalid quantity.');
     if (total === null || isNaN(total)) bad('Line ' + (i + 1) + ' needs an amount.');
     const unit = money(li && li.unitPriceIncl);
-    return { description: description, qty: qty === null ? 1 : qty, unitPriceIncl: unit === null || isNaN(unit) ? null : unit, lineTotalIncl: total };
+    // Stage 9: the account this item goes to on the bill ('' = the PO's). Checked against the chart in billPlan_.
+    const accountCode = text(li && li.accountCode, 12).replace(/[^\w.\-]/g, '');
+    return { description: description, qty: qty === null ? 1 : qty, unitPriceIncl: unit === null || isNaN(unit) ? null : unit, lineTotalIncl: total, accountCode: accountCode };
   });
   return out;
 }
@@ -996,20 +1001,63 @@ function billPlan_(po, f, contactId) {
   else throw new AppError('BAD_REQUEST', 'The VAT on the slip (' + randText_(vat) + ') is more than ' + rate + '% VAT on the total can be (' + randText_(fullVat) + '). Check both amounts.');
 
   const what = String(po.description);
-  let lines;
-  if (mode === 'mixed') {
-    const taxable = Math.min(total, round2_(vat * (100 + rate) / rate));
-    lines = [{ d: what + ' (items with VAT)', a: taxable, t: vatType }];
-    const rest = round2_(total - taxable);
-    if (rest > 0) lines.push({ d: what + ' (items without VAT: zero-rated or exempt)', a: rest, t: noVat });
+  // Which account each part goes to (Stage 9): every item carries one (the PO's unless the buyer or a
+  // suggestion chose another). Items count only when they add up to the total exactly; then each account
+  // gets ONE line listing its items. Items on several accounts that don't add up can't be split: refused.
+  const poAccount = String(po.account_code);
+  const allowed = allowedAccounts_({ accounts: getRefData(ent).accounts, config: { extraAccounts: getConfig('EXTRA_PURCHASE_ACCOUNTS_' + ent, '') } }, ent);
+  const items = (f.lineItems || []).map(li => Object.assign({}, li, { accountCode: String(li.accountCode || poAccount) }));
+  items.forEach(li => {
+    if (li.accountCode !== poAccount && !allowed[li.accountCode]) throw new AppError('BAD_REQUEST', 'Account ' + li.accountCode + ' can’t be used for “' + li.description + '”. Choose another account for it.');
+  });
+  const itemSum = round2_(items.reduce((s, li) => s + Number(li.lineTotalIncl), 0));
+  const itemsAddUp = items.length > 0 && Math.abs(itemSum - total) < 0.005;
+  const accountsUsed = uniq_(items.map(li => li.accountCode));
+  if (!itemsAddUp && accountsUsed.length > 1) {
+    throw new AppError('BAD_REQUEST', 'The items add up to ' + randText_(itemSum) + ', not the total ' + randText_(total) + '. Correct the amounts, or put the whole slip on one account.');
+  }
+  const itemName = (li) => li.description + (li.qty && li.qty !== 1 ? ' × ' + li.qty : '');
+  let groups;
+  if (itemsAddUp) {
+    // In the order the accounts first appear on the slip (object keys like "426" would sort numerically).
+    const by = {};
+    const order = [];
+    items.forEach(li => { if (!by[li.accountCode]) { by[li.accountCode] = []; order.push(li.accountCode); } by[li.accountCode].push(li); });
+    groups = order.map(code => ({
+      code: code, a: round2_(by[code].reduce((s, li) => s + Number(li.lineTotalIncl), 0)),
+      d: by[code].length === 1 ? itemName(by[code][0]) : by[code].map(li => itemName(li) + ' ' + randText_(li.lineTotalIncl)).join('; '),
+    }));
   } else {
-    const type = mode === 'none' ? noVat : vatType;
-    const slip = f.lineItems || [];
-    const sum = round2_(slip.reduce((s, li) => s + Number(li.lineTotalIncl), 0));
-    // The slip's own items only when they add up to the total exactly; otherwise one line for the total.
-    lines = slip.length && Math.abs(sum - total) < 0.005
-      ? slip.map(li => ({ d: li.description + (li.qty && li.qty !== 1 ? ' × ' + li.qty : ''), a: round2_(li.lineTotalIncl), t: type }))
-      : [{ d: what, a: total, t: type }];
+    groups = [{ code: accountsUsed[0] || poAccount, a: total, d: what }];
+  }
+
+  let lines;
+  if (mode === 'none' || mode === 'full') {
+    lines = groups.map(g => ({ d: g.d, a: g.a, t: mode === 'none' ? noVat : vatType, code: g.code }));
+  } else {
+    // Mixed slip (less VAT than the total would carry). The rule (4 Nov 2026): no VAT on fuel. If the
+    // slip's VAT is exactly what the non-fuel accounts carry, that is the split.
+    const zero = String(getConfig('ZERO_RATED_ACCOUNTS', '433')).split(/[,;\s]+/).filter(Boolean);
+    const fuel = groups.filter(g => zero.indexOf(g.code) !== -1);
+    const rest = groups.filter(g => zero.indexOf(g.code) === -1);
+    if (fuel.length && rest.length && Math.abs(round2_(rest.reduce((s, g) => s + taxOf(g.a), 0)) - vat) <= tol) {
+      lines = groups.map(g => ({ d: g.d, a: g.a, t: zero.indexOf(g.code) !== -1 ? noVat : vatType, code: g.code }));
+    } else {
+      // Otherwise the part carrying VAT (slip VAT × (100+rate)/rate) is shared over the accounts in
+      // proportion, each with its VAT-free remainder: the total VAT is right; the accountant fine-tunes.
+      const taxable = Math.min(total, round2_(vat * (100 + rate) / rate));
+      const shares = groups.map(g => round2_(g.a * taxable / total));
+      const biggest = groups.reduce((bi, g, i) => (g.a > groups[bi].a ? i : bi), 0);
+      shares[biggest] = round2_(shares[biggest] + taxable - shares.reduce((s, x) => s + x, 0));
+      const one = groups.length === 1;
+      lines = [];
+      groups.forEach((g, i) => {
+        const label = one ? what : g.d;
+        if (shares[i] > 0) lines.push({ d: label + ' (items with VAT)', a: shares[i], t: vatType, code: g.code });
+        const left = round2_(g.a - shares[i]);
+        if (left > 0) lines.push({ d: label + ' (items without VAT: zero-rated or exempt)', a: left, t: noVat, code: g.code });
+      });
+    }
   }
   lines.forEach(l => { l.tax = l.t === noVat ? 0 : taxOf(l.a); });
   let expectTax = round2_(lines.reduce((s, l) => s + l.tax, 0));
@@ -1025,12 +1073,29 @@ function billPlan_(po, f, contactId) {
   const invoice = (withOverrides) => ({
     Contact: { ContactID: contactId }, Date: f.date, DueDate: f.date, InvoiceNumber: reference, Reference: reference,
     LineItems: lines.map(l => {
-      const li = { Description: truncate_(l.d, 4000), Quantity: 1, UnitAmount: l.a, AccountCode: String(po.account_code), TaxType: l.t };
+      const li = { Description: truncate_(l.d, 4000), Quantity: 1, UnitAmount: l.a, AccountCode: l.code, TaxType: l.t };
       if (withOverrides && l.override) li.TaxAmount = l.tax;
       return li;
     }),
   });
-  return { reference: reference, mode: mode, total: total, expectTax: expectTax, overrides: overrides, invoice: invoice(true), invoicePlain: overrides ? invoice(false) : null, lines: lines.length };
+  return { reference: reference, mode: mode, total: total, expectTax: expectTax, overrides: overrides, invoice: invoice(true), invoicePlain: overrides ? invoice(false) : null, lines: lines.length, accounts: uniq_(lines.map(l => l.code)) };
+}
+
+/** The account each slip item goes to: its own confident suggestion (keyword rules or learned words), else the PO's. */
+function itemAccounts_(po, items) {
+  const ent = po.entity_id;
+  const poAccount = String(po.account_code);
+  let data = null;
+  try { data = codingData_(ent); } catch (err) { data = null; }
+  return items.map(li => {
+    if (li.accountCode) return li;
+    let code = poAccount;
+    if (data) {
+      const s = suggestAccountWith_(data, ent, '', '', li.description);
+      if (['keyword', 'words', 'borrowed'].indexOf(s.source) !== -1 && s.accountCode) code = s.accountCode;
+    }
+    return Object.assign({}, li, { accountCode: code });
+  });
 }
 
 /**

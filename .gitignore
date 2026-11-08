@@ -17,3 +17,6 @@ client_secret*.json
 
 # Frontend build output (Cloudflare Pages builds it)
 frontend/dist/
+
+# Offline test harness output
+tests/offline/build/

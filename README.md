@@ -93,8 +93,16 @@ Then run the UAT in `UAT.md` for HPB, NHP and PK.
 
 ## Tests
 
-Offline: the Node harness used during development checks every stage against fakes of Sheets, Drive, Composio, Xero and
-Gemini. In the editor (results in the execution log): `testTenantGuard`, `testCoding`, `testSyncGuards`,
+Offline (no network, nothing real is called), from the repo root:
+
+```sh
+tests/offline/run.sh          # summary and any failures; exits non-zero if anything fails
+tests/offline/run.sh --all    # every PASS line too
+```
+
+It runs every `.gs` file in Node against fakes of Sheets, Drive, Composio/Xero, Gemini and MailApp (Stages 5–9: 124
+checks), plus the coding engine's fixed cases (`testCoding`) and the category proposals. `tests/offline/build/` is
+generated and not committed. In the editor (results in the execution log): `testTenantGuard`, `testCoding`, `testSyncGuards`,
 `testCodingLive`, `testFastSheets`, `testAccessControl`, `testLockout`.
 
 Acceptance helpers:

@@ -3,7 +3,7 @@
  */
 
 const APP = Object.freeze({
-  VERSION: '0.8.0-stage8',
+  VERSION: '0.9.0-stage9',
   TZ: 'Africa/Johannesburg',
 });
 
@@ -60,6 +60,8 @@ const CONFIG_DEFAULTS = Object.freeze({
   WORD_BORROW_HPB: '',
   WORD_BORROW_NHP: '',
   WORD_BORROW_PK: 'HPB,NHP',
+  // Stage 9: accounts whose purchases carry no VAT (fuel), used to split a mixed slip by account exactly.
+  ZERO_RATED_ACCOUNTS: '433',
 });
 
 class AppError extends Error {
