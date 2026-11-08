@@ -199,7 +199,9 @@ const CATEGORY_PROPOSALS = Object.freeze([
   { sort: 80, name: 'Protective clothing (PPE)', code: '421', keywords: 'ppe, gloves, nitrile gloves, overalls, safety boots, gumboots, hairnet, hairnets, face mask, masks, goggles, lab coat, apron, hard hat' },
   { sort: 90, name: 'Repairs: building', code: '422', keywords: 'plumber, plumbing, paint, cement, light bulb, globe, globes, tap, padlock, lock, door handle, hardware, builders, silicone' },
   { sort: 100, name: 'Repairs: machinery', code: '423', keywords: 'bearing, bearings, v-belt, drive belt, motor, pump, spares, spare parts, welding, gasket, o-ring, seal, fittings, grease' },
-  { sort: 110, name: 'Small tools', code: '306', keywords: 'tool, tools, screwdriver, spanner, drill bit, drill bits, hammer, pliers, tape measure, extension cord, multiplug, cable ties', note: 'No tools account in the chart: mapped to 306 Consumables - Factory. Please review.' },
+  // 306 Consumables - Factory is a direct cost (cost of sales) for things used up in production, so
+  // tools go to machinery repairs instead (decided 8 Nov 2026).
+  { sort: 110, name: 'Small tools', code: '423', keywords: 'tool, tools, screwdriver, spanner, drill bit, drill bits, hammer, pliers, tape measure, extension cord, multiplug, cable ties', note: 'No tools account in the chart: mapped to 423 Repairs & Maintenance - Machinery.' },
   { sort: 120, name: 'Staff refreshments', code: '426', keywords: 'coffee, tea, milk, sugar, creamer, biscuits, refreshments, snacks, bottled water, lunch, cake' },
   { sort: 130, name: 'Courier and postage', code: '303', keywords: 'courier, postage, post office, pargo, paxi, aramex, courier guy, dhl, fedex, postnet' },
   { sort: 140, name: 'Office supplies and stationery', code: '420', keywords: 'stationery, a4 paper, paper, pen, pens, printer ink, ink, toner, cartridge, stapler, envelopes, files, printing, notebook' },
