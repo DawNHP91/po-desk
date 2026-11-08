@@ -43,7 +43,10 @@ export function render(root, ctx) {
         h('span', { class: 'block truncate text-sm text-slate-500' }, fmtDate(po.createdAt) + ' · ' + po.description)),
       h('span', { class: 'shrink-0 text-right' },
         h('span', { class: 'block font-semibold' }, rand(po.amountInclZar)),
-        h('span', { class: 'mt-1 block' }, statusChip(po.status))),
+        h('span', { class: 'mt-1 block' }, statusChip(po.status)),
+        po.refund && po.refund.status !== 'AFTER_SLIP' ? h('span', { class: 'mt-1 block' }, h('span', {
+          class: 'inline-block whitespace-nowrap rounded-full px-2.5 py-0.5 text-sm font-medium ' + (po.refund.status === 'DUE' ? 'bg-amber-100 text-amber-900' : 'bg-green-100 text-green-800'),
+        }, po.refund.status === 'DUE' ? 'Refund due' : 'Refunded')) : null),
     )));
   }
 

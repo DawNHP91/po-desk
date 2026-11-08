@@ -413,6 +413,18 @@ function xeroFindBillByNumber(tenantId, contactId, invoiceNumber, ctx) {
   return xeroList_(res.data || {}, 'Invoices').filter(i => String(i.InvoiceNumber || '') === String(invoiceNumber))[0] || null;
 }
 
+/** Bills by InvoiceID, 50 per call (Stage 11: has an own-money bill been paid, i.e. the person refunded?). */
+function xeroInvoicesByIds(tenantId, ids, ctx) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50);
+    chunk.forEach(id => assertUuid_(id, 'InvoiceID'));
+    const res = xeroProxy_(tenantId, 'GET', '/Invoices?IDs=' + chunk.join(','), {}, ctx);
+    Array.prototype.push.apply(out, xeroList_(res.data || {}, 'Invoices'));
+  }
+  return out;
+}
+
 function xeroGetInvoiceById(tenantId, invoiceId, ctx) {
   assertUuid_(invoiceId, 'InvoiceID');
   const res = xeroProxy_(tenantId, 'GET', '/Invoices/' + invoiceId, {}, ctx);

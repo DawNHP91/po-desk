@@ -1,5 +1,5 @@
 """Builds tests/offline/build/harness.js: base.js (Stage 5 fakes and checks) + the fake Xero for bills
-(fake6-*.js) + the Stage 6, 7, 9 and 10 checks. Run with tests/offline/run.sh."""
+(fake6-*.js) + the Stage 6, 7, 9, 10 and 11 checks. Run with tests/offline/run.sh."""
 import sys
 S = sys.argv[1]
 s = open(S + '/base.js').read()
@@ -24,10 +24,10 @@ rep("    getId() { return this.id; }, getName() { return this.name; }, setName(n
     "    getId() { return this.id; }, getName() { return this.name; }, setName(n) { this.name = n; return this; }, setTrashed(t) { this.trashed = t; return this; }, getMimeType() { return this.mime; }, sharing: 'PRIVATE', getSharingAccess() { return this.sharing; }, setSharing(a) { this.sharing = a; return this; },")
 rep("  DriveApp: { getFolderById: id => drive.folders[id],", "  DriveApp: { Access: { PRIVATE: 'PRIVATE', ANYONE_WITH_LINK: 'ANYONE_WITH_LINK' }, Permission: { NONE: 'NONE', VIEW: 'VIEW' }, getFolderById: id => drive.folders[id],")
 rep("ctx.X = X;", "ctx.X = X; ctx.faults = faults; ctx.xflags = xflags; ctx.idemSeen = idemSeen; ctx.parallelCalls = parallelCalls;")
-tests = '\n'.join(open(S + '/' + f).read() for f in ['stage6-tests.js', 'stage7-tests.js', 'stage9-tests.js', 'stage10-tests.js'] if __import__('os').path.exists(S + '/' + f))
+tests = '\n'.join(open(S + '/' + f).read() for f in ['stage6-tests.js', 'stage7-tests.js', 'stage9-tests.js', 'stage10-tests.js', 'stage11-tests.js'] if __import__('os').path.exists(S + '/' + f))
 marker = "\ncleanupTestPOs();\n"
 rep(marker, "\n" + tests + marker)
 rep("check('cleanup removes the test slips", "check('cleanup deletes the test bills in Xero first, then the (billed) POs; a real person’s PO is left alone', tNHP.invoices.every(i => i.Status === 'DELETED') && tNHP.pos.every(p => p.Status === 'DELETED' || (MEM.POs.find(x => x.xero_po_id === p.PurchaseOrderID) || {}).buyer_user_id === admin.user_id) && tNHP.pos.some(p => p.Status === 'AUTHORISED'), JSON.stringify(tNHP.invoices.map(i => i.Status)) + JSON.stringify(tNHP.pos.map(p => p.Status)));\ncheck('cleanup removes the test slips")
-rep("console.log('=== Stage 5 offline: '", "console.log('=== PO Desk offline (Stages 5-10): '")
+rep("console.log('=== Stage 5 offline: '", "console.log('=== PO Desk offline (Stages 5-11): '")
 open(S + '/build/harness.js', 'w').write(s)
 print('written')

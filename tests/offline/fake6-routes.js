@@ -12,8 +12,8 @@
     return { status: 200, data: { Invoices: [created] } };
   }
   if (method === 'GET' && u.pathname === '/Invoices') {
-    const ids = (u.searchParams.get('ContactIDs') || '').split(',').filter(Boolean), sts = (u.searchParams.get('Statuses') || '').split(',').filter(Boolean);
-    return { status: 200, data: { Invoices: st.invoices.filter(i => (!ids.length || ids.includes(i.Contact.ContactID)) && (!sts.length || sts.includes(i.Status)) && i.Type === 'ACCPAY') } };
+    const ids = (u.searchParams.get('ContactIDs') || '').split(',').filter(Boolean), sts = (u.searchParams.get('Statuses') || '').split(',').filter(Boolean), invIds = (u.searchParams.get('IDs') || '').split(',').filter(Boolean);
+    return { status: 200, data: { Invoices: st.invoices.filter(i => (!ids.length || ids.includes(i.Contact.ContactID)) && (!invIds.length || invIds.includes(i.InvoiceID)) && (!sts.length || sts.includes(i.Status)) && i.Type === 'ACCPAY') } };
   }
   let m2 = /^\/Invoices\/([0-9a-f-]{36})$/.exec(u.pathname);
   if (m2) {

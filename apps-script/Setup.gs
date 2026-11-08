@@ -125,13 +125,18 @@ const PAYMENT_METHOD_SEED = Object.freeze([
   { entity_id: 'NHP', type: 'CASH', label: 'Petty cash', last4: '', holder_name: 'custodian TBC', xero_bank_account_name: 'Petty Cash', xero_bank_account_id: '618f8bfe-9d39-4572-a38f-3637884ebb45' },
   { entity_id: 'PK', type: 'CASH', label: 'Petty cash', last4: '', holder_name: 'custodian TBC', xero_bank_account_name: 'Pharma Karu Petty Cash', xero_bank_account_id: '4016c0c3-7f48-45f0-b0e1-7ff3e3c4524e' },
   { entity_id: 'HPB', type: 'CASH', label: 'Petty cash', last4: '', holder_name: 'custodian TBC', xero_bank_account_name: 'HP Biotech Petty Cash', xero_bank_account_id: 'fc8f7e76-94bd-4871-9076-a53bc4ae8ef7' },
+  // Stage 11: the buyer pays with their own money and is refunded. No bank account: PO Desk records no
+  // payments; the accountant pays the person and records it against the (shop's) bill.
+  { entity_id: 'NHP', type: 'OWN', label: 'Own money', last4: '', holder_name: '', xero_bank_account_name: '', xero_bank_account_id: '' },
+  { entity_id: 'PK', type: 'OWN', label: 'Own money', last4: '', holder_name: '', xero_bank_account_name: '', xero_bank_account_id: '' },
+  { entity_id: 'HPB', type: 'OWN', label: 'Own money', last4: '', holder_name: '', xero_bank_account_name: '', xero_bank_account_id: '' },
 ]);
 
 function paymentMethodKey_(r) {
   return [r.entity_id, r.type, r.label, String(r.last4 || '')].join('|');
 }
 
-/** Upserts the seed cards and cash floats. Existing rows keep their pm_id and any values edited in the Sheet. */
+/** Upserts the seed cards, cash floats and Own money. Existing rows keep their pm_id and any values edited in the Sheet. */
 function seedPaymentMethods() {
   const existing = readTable('PaymentMethods').rows;
   const added = [];

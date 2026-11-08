@@ -273,8 +273,14 @@ function sendDigestNow() {
  * bill, by buyer; provisional refs still waiting for Xero; yesterday's bills with flags, plus bills
  * still finishing in Xero; and how many POs wait for approval.
  */
+/** What the person is owed: the slip total on the bill, else the PO amount. */
+function refundAmount_(po, bill) {
+  const t = bill ? Number(bill.total_incl_zar) : 0;
+  return t > 0 ? t : Number(po.amount_incl_zar) || 0;
+}
+
 function digest_(now) {
-  ['POs', 'Bills', 'Queue', 'Users'].forEach(invalidateTable_);
+  ['POs', 'Bills', 'Queue', 'Users', 'PaymentMethods'].forEach(invalidateTable_);
   const ymd = (d) => Utilities.formatDate(d, APP.TZ, 'yyyy-MM-dd');
   const yesterday = ymd(new Date(now.getTime() - 86400000));
   const openDays = Number(getConfig('DIGEST_OPEN_DAYS', 3));
@@ -284,6 +290,8 @@ function digest_(now) {
   const sent = {};
   bills.forEach(b => { if (b.status) sent[b.po_id] = b; });
   const jobs = readTable('Queue').rows;
+  const own = {};
+  readTable('PaymentMethods').rows.forEach(r => { if (r.type === PM_OWN) own[r.pm_id] = true; });
   const FLAG_TEXT = {
     VARIANCE: 'amount differs from the PO', SUPPLIER_MISMATCH: 'slip names another supplier', NO_VAT_NUMBER: 'no supplier VAT number',
     FULL_TAX_INVOICE: 'over the full-tax-invoice limit', DATE_GAP: 'slip date far from the PO', DUPLICATE: 'possible duplicate slip',
@@ -305,10 +313,12 @@ function digest_(now) {
     const flagged = bills.filter(b => b.entity_id === ent && live(b) && b.status && b.flags && b.flags !== '[]' &&
       ymd(new Date((parseJson_(b.steps_json) || {}).startedAt || b.created_at)) === yesterday);
     const unfinished = bills.filter(b => b.entity_id === ent && live(b) && (b.status === BILL_STATUS.QUEUED || b.status === BILL_STATUS.POSTING));
-    counts[ent] = { issued: issued.length, open: open.length, pending: pending.length, flagged: flagged.length, unfinished: unfinished.length, awaiting: awaiting.length };
+    // Own money (Stage 11): billed, and Xero hasn't shown the bill paid yet.
+    const refunds = pos.filter(r => own[r.pm_id] && r.status === PO_STATUS.BILLED && !r.refunded_at);
+    counts[ent] = { issued: issued.length, open: open.length, pending: pending.length, flagged: flagged.length, unfinished: unfinished.length, awaiting: awaiting.length, refunds: refunds.length };
 
     const out = ['== ' + e.short_name + ' =='];
-    if (!issued.length && !open.length && !pending.length && !flagged.length && !unfinished.length && !awaiting.length) {
+    if (!issued.length && !open.length && !pending.length && !flagged.length && !unfinished.length && !awaiting.length && !refunds.length) {
       sections.push(out.concat(['Nothing to report.']).join('\n'));
       return;
     }
@@ -337,9 +347,13 @@ function digest_(now) {
       unfinished.forEach(b => out.push('  ' + ((byId[b.po_id] || {}).po_number || b.po_id) + ': ' + truncate_((parseJson_(b.steps_json) || {}).lastError || 'waiting for its next try', 120)));
     }
     if (awaiting.length) out.push('', 'Waiting for approval: ' + awaiting.length);
+    if (refunds.length) {
+      out.push('', 'Refunds due (paid with their own money; refunded once the bill is paid in Xero): ' + refunds.length + ' (' + randText_(refunds.reduce((s, r) => s + refundAmount_(r, sent[r.po_id]), 0)) + ')');
+      refunds.forEach(r => out.push('  ' + (r.po_number || r.provisional_ref) + '  ' + randText_(refundAmount_(r, sent[r.po_id])) + '  ' + r.supplier_name + ': refund ' + (users[String(r.buyer_user_id)] || 'the buyer')));
+    }
     sections.push(out.join('\n'));
   });
-  const totals = Object.keys(counts).reduce((s, k) => s + counts[k].open + counts[k].pending + counts[k].flagged + counts[k].unfinished, 0);
+  const totals = Object.keys(counts).reduce((s, k) => s + counts[k].open + counts[k].pending + counts[k].flagged + counts[k].unfinished + counts[k].refunds, 0);
   return {
     subject: 'PO Desk daily: ' + Utilities.formatDate(now, APP.TZ, 'd MMM yyyy') + (totals ? ' — ' + totals + ' item(s) to look at' : ' — nothing needs attention'),
     body: sections.join('\n\n') + '\n\nOpen PO Desk: ' + appUrl_('/home'),

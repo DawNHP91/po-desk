@@ -17,7 +17,8 @@ const TABLES = Object.freeze({
   TaxRates: ['entity_id', 'tax_type', 'name', 'rate', 'status', 'synced_at'],
   Suppliers: ['entity_id', 'contact_id', 'name', 'vat_number', 'synced_at'],
   SupplierHistory: ['entity_id', 'contact_id', 'account_code', 'uses', 'last_used'],
-  POs: ['po_id', 'idem_key', 'entity_id', 'xero_po_id', 'po_number', 'provisional_ref', 'status', 'buyer_user_id', 'pm_id', 'contact_id', 'supplier_name', 'description', 'category_id', 'account_code', 'tax_type', 'amount_incl_zar', 'suggestion_source', 'created_at', 'approver_user_id', 'decided_at', 'bill_id', 'decision_note', 'reminded_at'],
+  // refunded_at: own-money purchases only, when Xero showed the bill paid, i.e. the person refunded (Stage 11).
+  POs: ['po_id', 'idem_key', 'entity_id', 'xero_po_id', 'po_number', 'provisional_ref', 'status', 'buyer_user_id', 'pm_id', 'contact_id', 'supplier_name', 'description', 'category_id', 'account_code', 'tax_type', 'amount_incl_zar', 'suggestion_source', 'created_at', 'approver_user_id', 'decided_at', 'bill_id', 'decision_note', 'reminded_at', 'refunded_at'],
   // status: '' (slip only) | POSTING | QUEUED | BILLED. steps_json: the Xero steps done so far (Stage 6).
   Bills: ['bill_id', 'po_id', 'entity_id', 'xero_invoice_id', 'slip_number', 'slip_date', 'supplier_vat_no', 'total_incl_zar', 'vat_zar', 'drive_file_id', 'ocr_json', 'flags', 'created_by', 'created_at', 'status', 'steps_json'],
   Queue: ['job_id', 'type', 'payload_json', 'attempts', 'next_run_at', 'last_error'],
@@ -123,7 +124,7 @@ function auditLog(entry) {
 // of tabs in one call and lets independent writes run in parallel (UrlFetchApp.fetchAll).
 // Any failure switches this execution back to SpreadsheetApp, so the app never depends on it.
 
-const DATE_COLUMNS = Object.freeze(['locked_until', 'pin_token_expires', 'created_at', 'synced_at', 'last_used', 'decided_at', 'next_run_at', 'ts', 'slip_date', 'reminded_at', 'sessions_valid_from']);
+const DATE_COLUMNS = Object.freeze(['locked_until', 'pin_token_expires', 'created_at', 'synced_at', 'last_used', 'decided_at', 'next_run_at', 'ts', 'slip_date', 'reminded_at', 'sessions_valid_from', 'refunded_at']);
 const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets/';
 
 /** Runs Sheets REST requests in parallel. req: { method, path, payload }. Returns parsed bodies; throws on any error. */

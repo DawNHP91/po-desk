@@ -44,6 +44,9 @@ const ROUTES = {
   keywordIdeas: { tabs: AUTH_TABS.concat(['Categories']), fn: (req, ctx) => actionKeywordIdeas_(req, ctx) },
 };
 
+// PaymentMethods.type of "the buyer paid and is refunded" (Stage 11).
+const PM_OWN = 'OWN';
+
 const PO_STATUS = Object.freeze({
   ISSUED: 'ISSUED', AWAITING_APPROVAL: 'AWAITING_APPROVAL', DECLINED: 'DECLINED',
   PENDING_XERO: 'PENDING_XERO', BILLED: 'BILLED', CANCELLED: 'CANCELLED',
@@ -428,10 +431,22 @@ function poView_(row, data, pm, bill) {
     accountCode: String(row.account_code),
     accountName: acct ? String(acct.name) : '',
     paidWith: pm ? (pm.type === 'CARD' && pm.last4 ? pm.label + ' ••' + pm.last4 : String(pm.label)) : '',
+    refund: refundView_(row, pm, bill),
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
     slip: bill ? Object.assign({ billId: bill.bill_id, reviewed: Number(bill.total_incl_zar) > 0, billed: !!bill.xero_invoice_id }, billView_(bill)) : null,
     decision: row.decided_at ? decisionView_(row) : null,
   };
+}
+
+/**
+ * Own money (Stage 11): null for card and cash. AFTER_SLIP until the bill exists, DUE until Xero shows the
+ * bill paid (the nightly check), then REFUNDED with the date.
+ */
+function refundView_(row, pm, bill) {
+  if (!pm || pm.type !== PM_OWN || [PO_STATUS.DECLINED, PO_STATUS.CANCELLED].indexOf(row.status) !== -1) return null;
+  const amount = refundAmount_(row, bill);
+  if (row.refunded_at) return { status: 'REFUNDED', amount: amount, at: row.refunded_at instanceof Date ? row.refunded_at.toISOString() : String(row.refunded_at) };
+  return { status: row.status === PO_STATUS.BILLED ? 'DUE' : 'AFTER_SLIP', amount: amount };
 }
 
 /** Who approved or declined the PO, when, and their note (Stage 7). */
@@ -1249,6 +1264,12 @@ function billNoteText_(po, f, steps) {
   else if (steps.supplierChoice === 'keep') parts.push('The slip names another supplier; the buyer kept the PO’s supplier.');
   if (steps.mode === 'mixed') parts.push('Mixed slip: one line carries the slip’s VAT, the rest is without VAT.');
   if ((steps.notes || []).length) parts.push('Notes: ' + steps.notes.join(' '));
+  // Own money first, so it is the first thing the accountant reads (Stage 11).
+  const pm = pmIndex_()[po.pm_id];
+  if (pm && pm.type === PM_OWN) {
+    const buyer = findBy('Users', 'user_id', po.buyer_user_id)[0];
+    parts.unshift('REFUND ' + (buyer ? String(buyer.name) : 'the buyer') + ' ' + randText_(f.totalIncl) + ': paid with their own money. Pay them and record it against this bill; PO Desk marks it refunded once Xero shows the bill paid.');
+  }
   return parts.join(' ');
 }
 

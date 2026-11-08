@@ -19,6 +19,13 @@ const BANNERS = {
   CANCELLED: ['bg-slate-100 text-slate-700 ring-slate-200', 'Cancelled', 'This PO was cancelled.'],
 };
 
+// Own money (Stage 11): where the buyer's refund stands.
+function refundText(r) {
+  if (r.status === 'REFUNDED') return `${rand(r.amount)} refunded (bill paid ${fmtDate(r.at)}).`;
+  if (r.status === 'DUE') return `${rand(r.amount)} due to you. You’re refunded once the bill is paid in Xero.`;
+  return 'Add the slip so the bill can be made; you’re refunded once it’s paid.';
+}
+
 export function render(root, ctx, params) {
   const poId = params[0];
   let alive = true;
@@ -93,6 +100,7 @@ export function render(root, ctx, params) {
         row('What', po.description),
         row('Account', po.accountCode + (po.accountName ? ' · ' + po.accountName : '')),
         row('Paid with', po.paidWith || '—'),
+        po.refund ? row('Refund', refundText(po.refund)) : null,
         row('Date', fmtDate(po.createdAt)),
       ),
       po.status === 'PENDING_XERO' ? h('button', { type: 'button', class: 'mt-4 w-full rounded-2xl border-2 border-slate-300 bg-white px-4 py-3 text-base font-semibold active:bg-slate-100', onclick: load }, 'Check again') : null,

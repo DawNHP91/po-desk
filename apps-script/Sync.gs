@@ -84,11 +84,62 @@ function syncAllNow_() {
 
   // Keywords learned from old bills, once every company's words are fresh (PK borrows HPB's and NHP's).
   const learnedKeywords = relearnAllKeywords_();
-  const summary = { totalMs: Date.now() - started, composioCalls: composioStats_.calls - callsBefore, results: results, learnedKeywords: learnedKeywords };
+  let refunds;
+  try { refunds = checkRefunds_(); } catch (err) { refunds = { error: err.message }; console.warn('Refund check failed: ' + err.message); }
+  const summary = { totalMs: Date.now() - started, composioCalls: composioStats_.calls - callsBefore, results: results, learnedKeywords: learnedKeywords, refunds: refunds };
   PropertiesService.getScriptProperties().setProperty('SYNC_LAST', JSON.stringify({ at: new Date().toISOString(), summary: summary }));
   auditLog({ action: 'sync.all', ok: results.length === ENTITY_SEED.length && results.every(r => r.ok), detail: summary });
   console.log('syncAll ' + JSON.stringify(summary, null, 2));
   return summary;
+}
+
+// --- Own money: refunds (Stage 11) ------------------------------------------------------------------
+
+/**
+ * Own-money purchases are refunded when the accountant pays the bill in Xero. Marks each billed one
+ * refunded once Xero shows its bill PAID: one Xero call per company that has refunds due, none otherwise.
+ * Returns { ENT: { due, refunded } }.
+ */
+function checkRefunds_() {
+  ['POs', 'Bills', 'PaymentMethods'].forEach(invalidateTable_);
+  const own = {};
+  readTable('PaymentMethods').rows.forEach(r => { if (r.type === PM_OWN) own[r.pm_id] = true; });
+  const bills = billIndex_();
+  const invoiceOf = (r) => String((bills[r.po_id] || {}).xero_invoice_id || '');
+  const due = readTable('POs').rows.filter(r => own[r.pm_id] && r.status === PO_STATUS.BILLED && !r.refunded_at && invoiceOf(r));
+  const out = {};
+  ENTITY_SEED.forEach(e => {
+    const mine = due.filter(r => r.entity_id === e.entity_id);
+    if (!mine.length) return;
+    const paid = {};
+    xeroInvoicesByIds(e.xero_tenant_id, mine.map(invoiceOf), { ref: 'refunds:' + e.entity_id }).forEach(i => {
+      if (i.Status === 'PAID') paid[String(i.InvoiceID)] = xeroDate_(i.FullyPaidOnDateString || i.FullyPaidOnDate) || new Date();
+    });
+    const done = mine.filter(r => paid[invoiceOf(r)]);
+    if (done.length) {
+      const lock = LockService.getScriptLock();
+      lock.waitLock(30000);
+      try {
+        invalidateTable_('POs');
+        done.forEach(r => {
+          const fresh = findBy('POs', 'po_id', r.po_id)[0];
+          if (fresh && !fresh.refunded_at) updateRowById('POs', 'po_id', r.po_id, { refunded_at: paid[invoiceOf(r)] });
+        });
+      } finally {
+        lock.releaseLock();
+      }
+      done.forEach(r => auditLog({ entityId: e.entity_id, action: 'po.refunded', ok: true, ref: r.po_id, detail: { po: r.po_number, amount: Number(r.amount_incl_zar) } }));
+    }
+    out[e.entity_id] = { due: mine.length - done.length, refunded: done.length };
+  });
+  return out;
+}
+
+/** Editor: check own-money refunds against Xero now (the nightly sync does it at 02:00). */
+function checkRefundsNow() {
+  const r = checkRefunds_();
+  console.log('checkRefundsNow ' + JSON.stringify(r));
+  return r;
 }
 
 /** One company on its own: its fresh IDs are checked against the other companies' rows in the Sheet. */

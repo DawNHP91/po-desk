@@ -3,7 +3,7 @@
  */
 
 const APP = Object.freeze({
-  VERSION: '0.10.0-keywords',
+  VERSION: '0.11.0-own-money',
   TZ: 'Africa/Johannesburg',
 });
 

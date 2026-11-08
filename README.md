@@ -66,7 +66,7 @@ screen and sets their own PIN from the emailed link. Every setup function is saf
 `setupSheets` again after any update that adds columns.
 
 Scheduled jobs (`installTriggers`, one trigger each, safe to run again): `nightlySync` 02:00 SAST (Xero
-reference data, supplier history, the learned-word index for account suggestions, and learned keywords), `processQueue` every 5 minutes (provisional POs, unfinished bills, approval reminders),
+reference data, supplier history, the learned-word index for account suggestions, learned keywords, and own-money refunds), `processQueue` every 5 minutes (provisional POs, unfinished bills, approval reminders),
 `dailyDigest` 08:00 SAST (email to admins). `sendDigestNow` shows today's digest any time.
 
 ## Go-live
@@ -100,7 +100,7 @@ tests/offline/run.sh          # summary and any failures; exits non-zero if anyt
 tests/offline/run.sh --all    # every PASS line too
 ```
 
-It runs every `.gs` file in Node against fakes of Sheets, Drive, Composio/Xero, Gemini and MailApp (Stages 5–10: 144
+It runs every `.gs` file in Node against fakes of Sheets, Drive, Composio/Xero, Gemini and MailApp (Stages 5–11: 155
 checks), plus the coding engine's fixed cases (`testCoding`, 46) and the category proposals (21). `tests/offline/build/` is
 generated and not committed. In the editor (results in the execution log): `testTenantGuard`, `testCoding`, `testSyncGuards`,
 `testCodingLive`, `testFastSheets`, `testAccessControl`, `testLockout`.
@@ -113,6 +113,7 @@ Acceptance helpers:
 - Account suggestions: `testCoding` (engine cases), `testWordSuggestions_NHP` / `_HPB` / `_PK` (backtest of
   learned words on the last 12 months of bills; changes nothing), `learnKeywordsNow` (relearns every company's
   keywords from old bills now instead of at 02:00).
+- Own money: `checkRefundsNow` (marks own-money POs refunded whose bill Xero shows paid, instead of at 02:00).
 - UAT: `createUatAccounts` (Script Property `UAT_PIN` first), `deactivateUatAccounts`, `cleanupTestPOs` (all three
   companies: deletes test bills, then test POs, in Xero; bins their slips; archives the "PO Desk Test Supplier …" and
   "QA Vendor …" contacts).

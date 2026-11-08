@@ -11,6 +11,10 @@ const SUGGEST_DELAY_MS = 600;
 const MAYBE_CREATED = ['TIMEOUT', 'NETWORK', 'BAD_RESPONSE', 'BUSY', 'INTERNAL'];
 
 const pmText = (pm) => (pm.type === 'CARD' && pm.last4 ? `${pm.label} ••${pm.last4}` : pm.label);
+// Own money (Stage 11): the buyer pays and the company refunds them once the bill is paid.
+const pmContent = (pm) => (pm.type === 'OWN'
+  ? [h('span', { class: 'block' }, pm.label), h('span', { class: 'block text-sm font-normal opacity-80' }, 'You pay; the company refunds you')]
+  : pmText(pm));
 
 export function render(root, ctx) {
   const { auth } = ctx;
@@ -36,9 +40,13 @@ export function render(root, ctx) {
     const pmButtons = ref.paymentMethods.map((pm) => h('button', {
       type: 'button', 'data-pm': pm.pmId, onclick: () => setPm(pm.pmId),
       class: 'rounded-xl border-2 px-4 py-3 text-left text-base font-medium touch-manipulation',
-    }, pmText(pm)));
+    }, pmContent(pm)));
+    const pmNote = h('p', { class: 'mt-2 hidden rounded-xl bg-sky-50 p-3 text-sm text-sky-900' },
+      'Keep the slip and add it to this PO. You’re refunded the slip total once the bill is paid in Xero.');
     function setPm(id) {
       s.pmId = id;
+      const pm = ref.paymentMethods.find((p) => p.pmId === id);
+      pmNote.classList.toggle('hidden', !pm || pm.type !== 'OWN');
       pmButtons.forEach((b) => {
         const on = b.getAttribute('data-pm') === id;
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
@@ -265,7 +273,7 @@ export function render(root, ctx) {
       h('h1', { class: 'mt-2 text-2xl font-bold' }, 'New PO'),
       h('div', { class: 'mt-6' }, h('p', { class: labelClass }, 'How are you paying?'),
         ref.paymentMethods.length
-          ? h('div', { class: 'mt-2 grid grid-cols-1 gap-2', role: 'group', 'aria-label': 'Payment method' }, pmButtons)
+          ? [h('div', { class: 'mt-2 grid grid-cols-1 gap-2', role: 'group', 'aria-label': 'Payment method' }, pmButtons), pmNote]
           : alertBox('No cards or cash floats are set up for ' + company.name + '. Ask your PO Desk admin.')),
       section('Supplier', 'supplier', supInput, chosen, results, supNote, newSup),
       section('What are you buying?', 'desc', descIn),

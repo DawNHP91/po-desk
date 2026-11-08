@@ -52,13 +52,13 @@ COMPOSIO_API_KEY, COMPOSIO_XERO_ACCOUNT_ID, COMPOSIO_USER_ID (if the API needs i
 - Entities(entity_id, legal_name, short_name, xero_tenant_id, drive_folder_id, brand_key, active)
 - Users(user_id, name, email, pin_hash, pin_salt, role [buyer|approver|admin], active, failed_attempts, locked_until, pin_token_hash, pin_token_expires, created_by, created_at, sessions_valid_from). Sessions started at or before sessions_valid_from are refused: set on deactivation and on every PIN link (Stage 7).
 - UserEntities(user_id, entity_id, can_buy, can_approve, po_limit_zar)
-- PaymentMethods(pm_id, entity_id, type [CARD|CASH], label, last4, holder_name, holder_user_id, xero_bank_account_id, xero_bank_account_name, active). Map by AccountID: these orgs' bank accounts have blank account codes.
+- PaymentMethods(pm_id, entity_id, type [CARD|CASH|OWN], label, last4, holder_name, holder_user_id, xero_bank_account_id, xero_bank_account_name, active). Map by AccountID: these orgs' bank accounts have blank account codes.
 - Categories(category_id, entity_id, name, account_code, tax_type, keywords, sort, active, learned_keywords, removed_keywords). keywords: typed by admins; learned_keywords: rewritten by the nightly sync from old bills; removed_keywords: words an admin took off, never learned again (Stage 10).
 - Accounts(entity_id, account_id, code, name, type, class, tax_type, status, synced_at)
 - TaxRates(entity_id, tax_type, name, rate, status, synced_at)
 - Suppliers(entity_id, contact_id, name, vat_number, synced_at)
 - SupplierHistory(entity_id, contact_id, account_code, uses, last_used)
-- POs(po_id, idem_key, entity_id, xero_po_id, po_number, provisional_ref, status, buyer_user_id, pm_id, contact_id, supplier_name, description, category_id, account_code, tax_type, amount_incl_zar, suggestion_source, created_at, approver_user_id, decided_at, bill_id, decision_note, reminded_at)
+- POs(po_id, idem_key, entity_id, xero_po_id, po_number, provisional_ref, status, buyer_user_id, pm_id, contact_id, supplier_name, description, category_id, account_code, tax_type, amount_incl_zar, suggestion_source, created_at, approver_user_id, decided_at, bill_id, decision_note, reminded_at, refunded_at). refunded_at: own-money purchases, when Xero showed the bill paid (Stage 11).
 - Bills(bill_id, po_id, entity_id, xero_invoice_id, slip_number, slip_date, supplier_vat_no, total_incl_zar, vat_zar, drive_file_id, ocr_json, flags, created_by, created_at, status ['' | POSTING | QUEUED | BILLED], steps_json)
 - Queue(job_id, type, payload_json, attempts, next_run_at, last_error)
 - WordIndex(entity_id, word, account_code, lines, synced_at): learned words, rebuilt by the nightly sync; word '#lines' holds the number of lines learned from.
@@ -78,13 +78,14 @@ Setup.gs seedPaymentMethods() writes these rows and is safe to run twice. Each c
 | PK | CASH | Petty cash | | custodian TBC | Pharma Karu Petty Cash | 4016c0c3-7f48-45f0-b0e1-7ff3e3c4524e |
 | HPB | CASH | Petty cash | | custodian TBC | HP Biotech Petty Cash | fc8f7e76-94bd-4871-9076-a53bc4ae8ef7 |
 Each company has one cash float. Bank accounts (cards and cash floats) are matched by AccountID, never by name, because the names differ per company. Ignore HPB's bank account named "UNUSED".
+Each company also has an "Own money" row (type OWN, no bank account; Stage 11, decided 8 Nov 2026): the buyer pays personally and is refunded. Every buyer sees it; PO limits and approvals apply as usual. The PO and the draft bill go to the shop exactly as for a card (VAT and the shop's coding history stay right); the PO Reference reads "Own money · <first name>" and the bill's History note starts "REFUND <full name> <slip total>". PO Desk records no payment: the accountant pays the person and records it against that bill. The nightly sync asks Xero for these bills (one call per company with refunds due) and sets POs.refunded_at once a bill is PAID; the buyer's PO shows "Refund due" until then, then "Refunded", and the 08:00 digest lists refunds still due.
 
 ## Seed data: first admin
 Setup.gs seedAdmin() creates the only user before go-live: Dawid Groenewald, dawie@nhpglobalgroup.com, role admin, active, with can_buy and can_approve for HPB, NHP and PK. po_limit_zar: ask Dawie before seeding. Everyone else is added on the People screen. Dawie sets his own PIN by running setPin() once from the Apps Script editor; never write a PIN into the repo, a file or a log.
 
 ## Flow 1: raise a PO
 1. Buyer logs in and picks the company (only those they may buy for; skip the picker if there is just one).
-2. Form: payment method (that company's cards and cash floats), supplier (type-ahead over cached Xero suppliers; "New supplier" creates a Xero contact), what is being bought, estimated amount incl. VAT in rand, category.
+2. Form: payment method (that company's cards, cash floats and Own money), supplier (type-ahead over cached Xero suppliers; "New supplier" creates a Xero contact), what is being bought, estimated amount incl. VAT in rand, category.
 3. The coding engine suggests an account code with a reason (e.g. "last 4 bills from this supplier"); the buyer can change it to any active purchase account of that company.
 4. Submit with a client-generated idemKey. Backend checks permissions, dedupes on idemKey, then creates the Xero PO: contact, Date and DeliveryDate today, one line (description, qty 1, amount, account code, tax type), Reference "<card label> ••<last4> · <buyer first name>", AttentionTo the buyer, Inclusive amounts.
 5. Amount within the buyer's limit: Status AUTHORISED; the PO number shows large with a copy button. Above the limit: Status SUBMITTED; the buyer sees the number marked "Awaiting approval: don't buy yet" and approvers are emailed with a link straight to the item. Approve sets AUTHORISED, decline sets DELETED (optional note); the buyer is told either way. One reminder after 4 working hours (Mon–Fri 08:00–17:00 SAST). Decided 4 Nov 2026: nobody decides their own PO, except an admin when no other active approver exists for that company; that is logged and marked "self-approved".
@@ -119,7 +120,7 @@ Keywords screen (Stage 10, decided 8 Nov 2026; admins only): a category name is 
 - Every action re-checks on the server that the user is still active, their role and their UserEntities; never trust the company the browser says it picked.
 - People are managed on the in-app People screen (admins only; built in Stage 7). Cards and cash floats are edited in the Sheet for v1; categories are switched on and their keywords managed on the Keywords screen (Stage 10), their account codes in the Sheet. Setup.gs keeps createUser() and setPin() only to bootstrap the first admin.
 - PINs are always chosen by the person through an emailed single-use link (48-hour expiry, token stored only as a hash). Admins never see or set anyone's PIN. A PIN reset clears the old PIN at once and ends the person's open sessions.
-- Scheduled jobs (Setup.gs installTriggers): nightlySync 02:00 (also relearns keywords), processQueue every 5 minutes (queue and approval reminders), dailyDigest 08:00 to admins. Each copes with its trigger being installed twice.
+- Scheduled jobs (Setup.gs installTriggers): nightlySync 02:00 (also relearns keywords and checks own-money refunds), processQueue every 5 minutes (queue and approval reminders), dailyDigest 08:00 to admins (including refunds due). Each copes with its trigger being installed twice.
 - Rate-limit logins and PO creation per user.
 
 ## UI and branding
