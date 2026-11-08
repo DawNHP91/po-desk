@@ -220,7 +220,9 @@ function proposeCategories() { proposeCategories_(false); }
 
 /**
  * Like proposeCategories, but also brings rows that are NOT switched on yet in line with the current
- * proposals (account code, keywords, order). Switched-on rows are the accountant's: never touched.
+ * proposals (account code, order, and any proposed keyword they lack). Keywords already there stay, so
+ * words added on the Keywords screen survive, and words an admin removed are not added back.
+ * Switched-on rows are the accountant's: never touched.
  */
 function updateCategoryProposals() { proposeCategories_(true); }
 
@@ -239,7 +241,10 @@ function proposeCategories_(updateInactive) {
       const already = existing.find(c => c.entity_id === e.entity_id && String(c.name).toLowerCase() === p.name.toLowerCase());
       let updated = '';
       if (already && updateInactive && !isTrue_(already.active)) {
-        const want = { account_code: ok ? p.code : '', keywords: p.keywords, sort: p.sort };
+        const have = splitKeywords_(already.keywords);
+        const gone = splitKeywords_(already.removed_keywords).map(keywordKey_);
+        splitKeywords_(p.keywords).forEach(k => { if (!have.some(x => keywordKey_(x) === keywordKey_(k)) && gone.indexOf(keywordKey_(k)) === -1) have.push(k); });
+        const want = { account_code: ok ? p.code : '', keywords: have.join(', '), sort: p.sort };
         const diff = Object.keys(want).filter(k => String(already[k]) !== String(want[k]));
         if (diff.length) { updateRowById('Categories', 'category_id', already.category_id, want); updated = 'updated ' + diff.join(', '); }
       }

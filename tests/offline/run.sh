@@ -11,7 +11,7 @@ OUT="$DIR/build/last-run.txt"
 node "$DIR/build/harness.js" "$DIR/../../apps-script" > "$OUT" 2>&1 || true
 if [ "$1" = "--all" ]; then grep -E "^(=== |PASS|FAIL)" "$OUT"; else grep -E "^(=== PO Desk|FAIL)|Error" "$OUT"; fi
 ok=0
-grep -q "offline (Stages 5-9): 0 failure" "$OUT" || ok=1
+grep -q "offline (Stages 5-10): 0 failure" "$OUT" || ok=1
 node "$DIR/coding.js" "$DIR/../../apps-script" || ok=1
 node "$DIR/categories.js" "$DIR/../../apps-script" || ok=1
 exit $ok

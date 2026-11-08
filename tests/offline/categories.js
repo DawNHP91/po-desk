@@ -7,6 +7,8 @@ const codes = { '433': 'EXPENSE', '432': 'EXPENSE', '312': 'DIRECTCOSTS', '313':
 ['HPB', 'NHP', 'PK'].forEach(e => Object.keys(codes).forEach(c => T.Accounts.push({ entity_id: e, code: c, name: 'Acct ' + c, type: codes[c], class: 'EXPENSE', status: 'ACTIVE', tax_type: 'INPUT3' })));
 const cat = (e, name, code, kw, active) => ({ category_id: crypto.randomUUID(), entity_id: e, name, account_code: code, tax_type: 'INPUT3', keywords: kw, sort: 1, active });
 ['HPB', 'NHP', 'PK'].forEach(e => T.Categories.push(cat(e, 'Small tools', '306', 'tool, tools', false), cat(e, 'Cleaning', '404', 'cleaning, soap', false), cat(e, 'Fuel', '433', 'my own fuel words', true)));
+// Stage 10: an admin added a word on the Keywords screen and removed a proposed one.
+Object.assign(T.Categories.find(c => c.entity_id === 'NHP' && c.name === 'Cleaning'), { keywords: 'cleaning, soap, dish washing liquid', removed_keywords: 'jik' });
 const ctx = { console: { log: m => logs.push(m), warn: m => logs.push('WARN ' + m) }, Utilities: { getUuid: () => crypto.randomUUID(), newBlob: (s) => ({ getBytes: () => Buffer.from(String(s)) }) } };
 vm.createContext(ctx);
 const src = ['Config', 'Db', 'Main', 'Auth', 'Approvals', 'Composio', 'Xero', 'Sync', 'Coding', 'Drive', 'Ocr', 'Setup', 'Tests'].map(f => fs.readFileSync(dir + '/' + f + '.gs', 'utf8')).join('\n');
@@ -25,6 +27,7 @@ const get = (e, n) => T.Categories.filter(c => c.entity_id === e && c.name === n
 ['HPB', 'NHP', 'PK'].forEach(e => {
   check(e + ': Small tools (inactive) moved 306 -> 423', get(e, 'Small tools')[0].account_code === '423', JSON.stringify(get(e, 'Small tools')));
   check(e + ': Cleaning (inactive) keywords updated, keeps 404', get(e, 'Cleaning')[0].account_code === '404' && /hand soap/.test(get(e, 'Cleaning')[0].keywords), JSON.stringify(get(e, 'Cleaning')));
+  if (e === 'NHP') check('NHP: Cleaning keeps the admin’s "dish washing liquid" and doesn’t get back the removed "jik"', /dish washing liquid/.test(get(e, 'Cleaning')[0].keywords) && !/\bjik\b/.test(get(e, 'Cleaning')[0].keywords) && /bleach/.test(get(e, 'Cleaning')[0].keywords), get(e, 'Cleaning')[0].keywords);
   check(e + ': Fuel (switched on) untouched', get(e, 'Fuel')[0].keywords === 'my own fuel words', JSON.stringify(get(e, 'Fuel')));
   check(e + ': Factory consumables added once, inactive, 306', get(e, 'Factory consumables').length === 1 && get(e, 'Factory consumables')[0].account_code === '306' && get(e, 'Factory consumables')[0].active === false, JSON.stringify(get(e, 'Factory consumables')));
   check(e + ': PPE added without gloves', get(e, 'Protective clothing (PPE)').length === 1 && !/gloves/.test(get(e, 'Protective clothing (PPE)')[0].keywords), '');

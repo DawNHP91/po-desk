@@ -598,6 +598,7 @@ function codingFixture_() {
 function testCoding() {
   const F = codingFixture_;
   const withConfig = patch => { const d = F(); Object.assign(d.config, patch); return d; };
+  const withCat = (id, patch) => { const d = F(); Object.assign(d.categories.find(c => c.category_id === id), patch); return d; };
   const run = (data, contact, cat, desc) => suggestAccountWith_(data, 'NHP', contact, cat, desc);
   const runPK = (data, desc) => suggestAccountWith_(data, 'PK', null, null, desc);
   // PK with its own words (or none) and NHP's words to borrow.
@@ -647,6 +648,12 @@ function testCoding() {
     ['words: an archived account is never suggested', () => run(F(), null, null, 'stationery'), { source: 'fallback', accountCode: '465' }],
     ['words: the company names teach nothing', () => run(F(), null, null, 'NHP Global'), { source: 'fallback', accountCode: '465' }],
     ['words: unknown words fall through', () => run(F(), null, null, 'flowers for reception'), { source: 'fallback', accountCode: '465' }],
+    // Stage 10: plurals, learned and removed keywords
+    ['keyword: plurals fold ("MOPS" matches "mop")', () => run(F(), null, null, 'MOPS X2'), { source: 'keyword', accountCode: '404', reasonHas: '"mop" matches Cleaning.' }],
+    ['keyword: "tea" still doesn’t match "team"', () => run(withCat('cat-clean', { keywords: 'tea' }), null, null, 'team lunch'), { source: 'fallback', accountCode: '465' }],
+    ['keyword: a learned keyword is used, and the reason says so', () => run(withCat('cat-clean', { learned_keywords: 'sunlight' }), null, null, 'SUNLIGHT LIQUID 750ML'), { source: 'keyword', accountCode: '404', reasonHas: '(learned from old bills)' }],
+    ['keyword: a learned keyword an admin removed is ignored', () => run(withCat('cat-clean', { learned_keywords: 'sunlight', removed_keywords: 'Sunlight' }), null, null, 'SUNLIGHT LIQUID'), { source: 'fallback', accountCode: '465' }],
+    ['keyword: an admin’s keyword beats a learned one of the same length', () => run(withCat('cat-clean', { learned_keywords: 'boxes' }), null, null, 'boxes'), { source: 'keyword', accountCode: '311' }],
   ];
 
   const lines = [];
@@ -678,6 +685,24 @@ function testCoding() {
   check('recordChoice: window trimmed, oldest code removed', a1.length === 1 && a1[0].uses === 5, JSON.stringify(a1));
   const a2 = applyChoice_([{ account_code: '433', uses: 5, last_used: d('2026-06-01') }], '404', d('2026-11-03'), 5);
   check('recordChoice: new code added, total stays at N', a2.length === 2 && a2.find(r => r.account_code === '433').uses === 4 && a2.find(r => r.account_code === '404').uses === 1, JSON.stringify(a2));
+
+  // Stage 10: keywords learned from old bill lines, and how old bills back a keyword.
+  const fx = F();
+  const allowedNHP = allowedAccounts_(fx, 'NHP');
+  const L = (n, desc, code) => Array(n).fill({ desc: desc, code: code });
+  const idx = buildWordIndex_([].concat(L(3, 'Sunlight liquid REG 750ML', '404'), L(2, 'Liquid soap', '311'), L(3, 'Bleach 5L', '404'),
+    L(3, 'Kraft boxes', '311'), L(3, 'Printer toner', '420'), L(2, 'Domestos thick', '404'), L(1, 'Domestos thick', '311')), 2);
+  const nhpCats = fx.categories.filter(c => c.entity_id === 'NHP');
+  const lk = learnKeywords_(nhpCats, idx, null, allowedNHP);
+  check('learn: "sunlight" (3 of 3 lines) -> Cleaning; "kraft" -> Packaging; not "liquid" (3 of 5), "reg"/"750ml" (pack words), "bleach" (an admin’s already), "domestos" (2 of 3), "toner" (archived 420)',
+    JSON.stringify(lk) === JSON.stringify({ 'cat-clean': ['sunlight'], 'cat-pack': ['kraft'] }), JSON.stringify(lk));
+  const lk2 = learnKeywords_(nhpCats.map(c => c.category_id === 'cat-clean' ? Object.assign({}, c, { removed_keywords: 'sunlight' }) : c), idx, null, allowedNHP);
+  check('learn: a word an admin removed from the category is not learned again', !lk2['cat-clean'], JSON.stringify(lk2));
+  const ev = keywordEvidence_('liquid soap', [{ index: idx, code: '404', allowed: allowedNHP }]);
+  check('evidence: a phrase is judged by its rarest known word ("soap": 2 lines, both to 311 Packaging)', ev && ev.word === 'soap' && ev.lines === 2 && ev.right === 0 && ev.other.label === '311 Packaging' && ev.other.lines === 2, JSON.stringify(ev));
+  check('evidence: none for a word old bills never had', keywordEvidence_('domestic', [{ index: idx, code: '404', allowed: allowedNHP }]) === null, '');
+  check('cleanKeyword_: lower case, single spaces; refuses "the", "x" and "<b>"', cleanKeyword_('  Dish   Washing Liquid ') === 'dish washing liquid' &&
+    ['the', 'x', '<b>'].every(k => { try { cleanKeyword_(k); return false; } catch (err) { return err.code === 'BAD_REQUEST'; } }), '');
 
   // Cache chunking.
   const big = new Array(9000).join('Pharma Karu é ✓ ');   // multibyte, ~150k chars

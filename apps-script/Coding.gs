@@ -1,9 +1,9 @@
 /**
  * Coding.gs — suggests the chart-of-accounts code for a purchase, and learns from the buyer's choice.
  *
- * Order (CLAUDE.md): 1 supplier history → 2 keyword rules → 3 learned words (past bills with the
- * same words; then words borrowed from other companies, Config WORD_BORROW_<company>) → 4 category
- * default → 5 fallback.
+ * Order (CLAUDE.md): 1 supplier history → 2 keyword rules (admins' keywords, then keywords learned
+ * from old bills) → 3 learned words (past bills with the same words; then words borrowed from other
+ * companies, Config WORD_BORROW_<company>) → 4 category default → 5 fallback.
  * Every candidate must be an ACTIVE purchase account in THIS company's synced chart; anything else
  * (archived, another company's code, a balance-sheet account) is skipped, never returned.
  */
@@ -126,18 +126,21 @@ function suggestAccountWith_(data, ent, contactId, categoryId, description) {
 
   const categories = (data.categories || []).filter(c => c.entity_id === ent && isTrue_(c.active));
 
-  // 2. Keyword rules, scored by matched characters so "lab coat" beats "lab".
+  // 2. Keyword rules (admins' and learned), scored by matched characters so "lab coat" beats "lab";
+  // an admin's keyword beats a learned one of the same length.
   const desc = String(description || '').toLowerCase();
   if (desc) {
+    const tokens = keywordTokens_(desc);
     const scored = categories.map(c => {
-      const hits = splitKeywords_(c.keywords).filter(k => keywordMatches_(desc, k));
-      return { cat: c, hits: hits, score: hits.reduce((s, k) => s + k.length, 0) };
+      const hits = categoryKeywords_(c).filter(x => keywordMatches_(tokens, x.k)).sort((a, b) => b.k.length - a.k.length || a.learned - b.learned);
+      return { cat: c, hits: hits, score: hits.reduce((s, x) => s + x.k.length + (x.learned ? 0 : 0.5), 0) };
     }).filter(x => x.score > 0)
       .sort((a, b) => b.score - a.score || (Number(a.cat.sort) || 0) - (Number(b.cat.sort) || 0));
     for (let i = 0; i < scored.length; i++) {
       const code = String(scored[i].cat.account_code || '');
       if (allowed[code]) {
-        return result(code, 'keyword', '"' + scored[i].hits[0] + '" matches ' + scored[i].cat.name + '.', scored[i].cat.tax_type, false);
+        const top = scored[i].hits[0];
+        return result(code, 'keyword', '"' + top.k + '" matches ' + scored[i].cat.name + (top.learned ? ' (learned from old bills).' : '.'), scored[i].cat.tax_type, false);
       }
       skipped.push('keyword category ' + scored[i].cat.name + ' has code ' + (code || '(blank)') + ', not an active purchase account here');
     }
@@ -213,10 +216,44 @@ function splitKeywords_(s) {
   return String(s || '').toLowerCase().split(/[,;\n]+/).map(k => k.trim().replace(/\s+/g, ' ')).filter(Boolean);
 }
 
-/** Whole words / phrases only, so "shell" doesn't match "shellfish" and "tea" doesn't match "team". */
-function keywordMatches_(descLower, keyword) {
-  const pattern = keyword.split(' ').map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
-  return new RegExp('(^|[^a-z0-9])' + pattern + '($|[^a-z0-9])', 'i').test(descLower);
+/** Lower-case words with plurals folded ("MOPS" -> mop, "dishes" -> dish), split on anything else. */
+function keywordTokens_(text) {
+  const t = String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return t ? t.split(' ').map(stemWord_) : [];
+}
+
+/** One form for comparing keywords: "Mops" and "mop" are the same keyword. */
+function keywordKey_(keyword) {
+  return keywordTokens_(keyword).join(' ');
+}
+
+/**
+ * Whole words / phrases only, so "shell" doesn't match "shellfish" and "tea" doesn't match "team";
+ * plurals fold, so "mop" matches "MOPS". desc: text or keywordTokens_(text).
+ */
+function keywordMatches_(desc, keyword) {
+  const d = Array.isArray(desc) ? desc : keywordTokens_(desc);
+  const k = keywordTokens_(keyword);
+  if (!k.length || k.length > d.length) return false;
+  for (let i = 0; i + k.length <= d.length; i++) {
+    let j = 0;
+    while (j < k.length && d[i + j] === k[j]) j++;
+    if (j === k.length) return true;
+  }
+  return false;
+}
+
+/** A category's keywords: the admins' first, then learned ones not removed by an admin. [{ k, learned }] */
+function categoryKeywords_(c) {
+  const own = splitKeywords_(c.keywords);
+  const ownKeys = own.map(keywordKey_);
+  const removed = splitKeywords_(c.removed_keywords).map(keywordKey_);
+  const out = own.map(k => ({ k: k, learned: false }));
+  splitKeywords_(c.learned_keywords).forEach(k => {
+    const key = keywordKey_(k);
+    if (ownKeys.indexOf(key) === -1 && removed.indexOf(key) === -1) out.push({ k: k, learned: true });
+  });
+  return out;
 }
 
 function isTrue_(v) {
@@ -442,4 +479,407 @@ function borrowedWordIndex_(ent, accounts) {
     console.warn('Borrowed words unavailable for ' + ent + ': ' + err.message);
     return null;
   }
+}
+
+// --- Keywords: typed by admins, learned from old bills, ideas from AI (Stage 10) ----------------------
+//
+// Categories.keywords are the admins' (Keywords screen, or the Sheet). learned_keywords are rewritten
+// by the nightly sync: a word becomes a keyword when at least LEARN_MIN_SHARE of at least LEARN_MIN_LINES
+// old bill lines carrying it went to one category's account. removed_keywords are words an admin took
+// off; learning never adds them back. A category name is the same category in every company that has
+// it, so an admin's keyword goes to all of them unless they pick one company.
+
+const KEYWORD_RULES = Object.freeze({
+  MIN_LEN: 2, MAX_LEN: 40, MAX_PER_ADD: 20,
+  LEARN_MIN_LINES: 3, LEARN_MIN_SHARE: 0.9, LEARN_MAX_PER_CATEGORY: 25,
+  IDEAS_MAX: 15,
+});
+
+// Words on till slips that describe the pack, not what was bought ("JIK REG 750ML", "SUNLIGHT RGLR REFILL").
+const LEARN_STOP = Object.freeze(['reg', 'rglr', 'regular', 'refill', 'large', 'lrg', 'small', 'sml', 'medium', 'med', 'pack', 'pck', 'pkt',
+  'assorted', 'asst', 'original', 'orig', 'classic', 'plain', 'mini', 'maxi', 'value', 'bulk', 'free', 'promo', 'special', 'extra', 'family',
+  'tub', 'btl', 'can', 'box', 'bag', 'roll', 'litre', 'liter', 'ltr', 'gram', 'kg', 'ml', 'unit', 'units', 'piece', 'pcs', 'set']);
+
+/** A keyword as stored: lower case, single spaces. Throws a buyer-readable error when it can't be a keyword. */
+function cleanKeyword_(raw) {
+  const k = String(raw === null || raw === undefined ? '' : raw).toLowerCase().replace(/\s+/g, ' ').trim();
+  if (k.length < KEYWORD_RULES.MIN_LEN) throw new AppError('BAD_REQUEST', 'A keyword needs at least ' + KEYWORD_RULES.MIN_LEN + ' letters.');
+  if (k.length > KEYWORD_RULES.MAX_LEN) throw new AppError('BAD_REQUEST', 'Keep each keyword under ' + KEYWORD_RULES.MAX_LEN + ' characters.');
+  if (!/^[a-z0-9][a-z0-9 &'\/.\-]*$/.test(k) || !/[a-z]/.test(k)) throw new AppError('BAD_REQUEST', '“' + k + '”: use letters, numbers and spaces only.');
+  const tokens = keywordTokens_(k);
+  if (!tokens.length || tokens.every(t => WORD_STOP.indexOf(t) !== -1)) throw new AppError('BAD_REQUEST', '“' + k + '” is too general to point to one category.');
+  return k;
+}
+
+/**
+ * Pure. Keywords learned from one company's old bill lines: { categoryId: [words] }. Only categories whose
+ * account is an active purchase account here; a word an admin already uses anywhere in this company, or
+ * removed from that category, is left out. borrowed: other companies' words (same code and name only).
+ */
+function learnKeywords_(categories, index, borrowed, allowed, opts) {
+  opts = opts || {};
+  const minLines = opts.minLines || KEYWORD_RULES.LEARN_MIN_LINES;
+  const minShare = opts.minShare || KEYWORD_RULES.LEARN_MIN_SHARE;
+  const max = opts.max || KEYWORD_RULES.LEARN_MAX_PER_CATEGORY;
+  const byCode = {};
+  categories.slice().sort((a, b) => (Number(a.sort) || 0) - (Number(b.sort) || 0)).forEach(c => {
+    const code = String(c.account_code || '');
+    if (allowed[code] && !byCode[code]) byCode[code] = c;   // two categories on one account: the first one learns
+  });
+  const taken = {};
+  const removed = {};
+  categories.forEach(c => {
+    splitKeywords_(c.keywords).forEach(k => { taken[keywordKey_(k)] = true; });
+    splitKeywords_(c.removed_keywords).forEach(k => { removed[c.category_id + '|' + keywordKey_(k)] = true; });
+  });
+  const found = {};
+  [index, borrowed].forEach(idx => {
+    if (!idx || !idx.w) return;
+    Object.keys(idx.w).forEach(word => {
+      if (/\d/.test(word) || word.length < 3 || LEARN_STOP.indexOf(word) !== -1) return;
+      const e = idx.w[word];
+      let best = '';
+      Object.keys(e[1]).forEach(code => { if (!best || e[1][code] > e[1][best]) best = code; });
+      const n = best ? e[1][best] : 0;
+      if (n < minLines || n / e[0] < minShare) return;
+      const cat = byCode[best];
+      const key = keywordKey_(word);
+      if (!cat || taken[key] || removed[cat.category_id + '|' + key]) return;
+      const f = found[cat.category_id] || (found[cat.category_id] = {});
+      if (!(word in f)) f[word] = n;   // own words first; a borrowed duplicate doesn't add to them
+    });
+  });
+  const out = {};
+  Object.keys(found).forEach(id => {
+    out[id] = Object.keys(found[id]).sort((a, b) => found[id][b] - found[id][a] || a.localeCompare(b)).slice(0, max);
+  });
+  return out;
+}
+
+/** Rewrites one company's learned keywords from its current word index. Run by the nightly sync. */
+function relearnKeywords_(ent) {
+  ent = entityById_(ent).entity_id;
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    invalidateTable_('Categories');
+    const table = readTable('Categories');
+    if (!keywordColumnsReady_(table)) return { skipped: 'Categories has no learned_keywords column yet: run setupSheets()' };
+    const ref = getRefData(ent);
+    const cats = table.rows.filter(r => r.entity_id === ent);
+    const learned = learnKeywords_(cats, wordIndexFor_(ent), borrowedWordIndex_(ent, ref.accounts), allowedFor_(ent, ref));
+    let words = 0;
+    let changed = 0;
+    cats.forEach(c => {
+      const list = learned[c.category_id] || [];
+      words += list.length;
+      if (String(c.learned_keywords || '') !== list.join(', ')) {
+        updateRowById('Categories', 'category_id', c.category_id, { learned_keywords: list.join(', ') });
+        changed++;
+      }
+    });
+    return { categories: cats.length, learnedKeywords: words, categoriesChanged: changed };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Every company's learned keywords, after the sync has rebuilt all word indexes (PK borrows HPB's and NHP's). */
+function relearnAllKeywords_() {
+  const out = {};
+  ENTITY_SEED.forEach(e => {
+    try { out[e.entity_id] = relearnKeywords_(e.entity_id); } catch (err) { out[e.entity_id] = { error: err.message }; }
+  });
+  return out;
+}
+
+function keywordColumnsReady_(table) {
+  return table.headers.indexOf('learned_keywords') !== -1 && table.headers.indexOf('removed_keywords') !== -1;
+}
+
+function allowedFor_(ent, ref) {
+  return allowedAccounts_({ accounts: (ref || getRefData(ent)).accounts, config: { extraAccounts: getConfig('EXTRA_PURCHASE_ACCOUNTS_' + ent, '') } }, ent);
+}
+
+/**
+ * Pure. How old bill lines with this keyword were coded, over several companies:
+ * { word, lines, right, other: { label, lines } | null } or null when no old line has it. right = lines that
+ * went to that company's category account. A phrase is judged by its rarest word that old bills know.
+ * sources: [{ index, code, allowed }].
+ */
+function keywordEvidence_(keyword, sources) {
+  const tokens = keywordTokens_(keyword);
+  let word = '';
+  let fewest = Infinity;
+  tokens.forEach(t => {
+    const n = sources.reduce((s, src) => s + (src.index && src.index.w && src.index.w[t] ? src.index.w[t][0] : 0), 0);
+    if (n > 0 && n < fewest) { fewest = n; word = t; }
+  });
+  if (!word) return null;
+  let lines = 0;
+  let right = 0;
+  const others = {};
+  sources.forEach(src => {
+    const e = src.index && src.index.w && src.index.w[word];
+    if (!e) return;
+    lines += e[0];
+    Object.keys(e[1]).forEach(code => {
+      if (code === String(src.code)) { right += e[1][code]; return; }
+      const label = code + (src.allowed && src.allowed[code] ? ' ' + src.allowed[code].name : '');
+      others[label] = (others[label] || 0) + e[1][code];
+    });
+  });
+  const top = Object.keys(others).sort((a, b) => others[b] - others[a])[0];
+  return { word: word, lines: lines, right: right, other: top ? { label: top, lines: others[top] } : null };
+}
+
+// --- Keywords screen (admins only) ---------------------------------------------------------------
+
+/** Every category (grouped by name across companies) with its keywords and how old bills back them. */
+function keywordsOverview_(onlyName) {
+  const table = readTable('Categories');
+  const ent = {};
+  ENTITY_SEED.forEach(e => {
+    const ref = getRefData(e.entity_id);
+    ent[e.entity_id] = { name: e.short_name, allowed: allowedFor_(e.entity_id, ref), index: wordIndexFor_(e.entity_id) };
+  });
+  const groups = {};
+  const order = [];
+  table.rows.forEach(r => {
+    if (!ent[r.entity_id] || !String(r.name || '').trim()) return;
+    const key = String(r.name).trim().toLowerCase();
+    if (onlyName && key !== String(onlyName).trim().toLowerCase()) return;
+    if (!groups[key]) { groups[key] = []; order.push(key); }
+    groups[key].push(r);
+  });
+  const categories = order.map(key => {
+    const rows = groups[key].sort((a, b) => ENTITY_SEED.findIndex(e => e.entity_id === a.entity_id) - ENTITY_SEED.findIndex(e => e.entity_id === b.entity_id));
+    const merge = (field, filter) => {
+      const out = [];
+      rows.forEach(r => {
+        const list = field === 'learned' ? categoryKeywords_(r).filter(x => x.learned).map(x => x.k) : splitKeywords_(r[field]);
+        list.forEach(k => {
+          const kk = keywordKey_(k);
+          let m = out.find(x => x.key === kk);
+          if (!m) { m = { key: kk, k: k, entityIds: [] }; out.push(m); }
+          if (m.entityIds.indexOf(r.entity_id) === -1) m.entityIds.push(r.entity_id);
+        });
+      });
+      return out.map(m => {
+        const v = { k: m.k, entityIds: m.entityIds };
+        if (filter) {
+          const sources = rows.filter(r => m.entityIds.indexOf(r.entity_id) !== -1)
+            .map(r => ({ index: ent[r.entity_id].index, code: String(r.account_code || ''), allowed: ent[r.entity_id].allowed }));
+          v.evidence = keywordEvidence_(m.k, sources);
+        }
+        return v;
+      });
+    };
+    return {
+      name: String(rows[0].name).trim(),
+      sort: Number(rows[0].sort) || 0,
+      companies: rows.map(r => {
+        const code = String(r.account_code || '');
+        const acct = ent[r.entity_id].allowed[code];
+        return { entityId: r.entity_id, company: ent[r.entity_id].name, categoryId: r.category_id, accountCode: code, accountName: acct ? acct.name : '', valid: !!acct, active: isTrue_(r.active) };
+      }),
+      keywords: merge('keywords', true),
+      learned: merge('learned', true),
+      removed: merge('removed_keywords', false),
+    };
+  }).sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name));
+  return {
+    columnsReady: keywordColumnsReady_(table),
+    companies: ENTITY_SEED.map(e => ({ entityId: e.entity_id, name: e.short_name })),
+    categories: categories,
+  };
+}
+
+function actionListKeywords_(req, ctx) {
+  requireAdmin_(ctx);
+  return keywordsOverview_();
+}
+
+/** The category rows for a name (every company that has it), read fresh. */
+function categoryRowsByName_(name) {
+  const key = String(name || '').trim().toLowerCase();
+  const rows = key ? readTable('Categories').rows.filter(r => String(r.name || '').trim().toLowerCase() === key && ENTITY_SEED.some(e => e.entity_id === r.entity_id)) : [];
+  if (!rows.length) throw new AppError('NOT_FOUND', 'Category not found.');
+  return rows;
+}
+
+/**
+ * Adds or removes keywords of a category. payload: { name, op: 'add'|'remove', keyword, entityIds? }.
+ * add: several may be sent separated by commas; they go to every company with this category (or only
+ * entityIds), and stop being "removed" or "learned" there. remove: takes it off the admins' and the
+ * learned list and remembers it, so learning never adds it back.
+ */
+function actionSaveKeyword_(req, ctx) {
+  requireAdmin_(ctx);
+  const p = req.payload;
+  const op = String(p.op || '');
+  if (op !== 'add' && op !== 'remove') throw new AppError('BAD_REQUEST', 'Unknown keyword change.');
+  rateLimit_('keywords', ctx.user.user_id, 200, 3600);
+  const parts = String(p.keyword || '').split(/[,;\n]+/).map(x => x.trim()).filter(Boolean);
+  if (!parts.length) throw new AppError('BAD_REQUEST', 'Type a keyword.');
+  if (parts.length > KEYWORD_RULES.MAX_PER_ADD) throw new AppError('BAD_REQUEST', 'Add at most ' + KEYWORD_RULES.MAX_PER_ADD + ' keywords at a time.');
+  // Removing never validates: a word typed into the Sheet by hand must still be removable.
+  const words = [];
+  parts.map(op === 'add' ? cleanKeyword_ : (x => x.toLowerCase().replace(/\s+/g, ' ').trim())).forEach(w => { if (!words.some(x => keywordKey_(x) === keywordKey_(w))) words.push(w); });
+  const keys = words.map(keywordKey_);
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(PO_RULES.LOCK_WAIT_MS)) throw new AppError('BUSY', 'PO Desk is busy. Please try again.');
+  let name;
+  let targets;
+  try {
+    invalidateTable_('Categories');
+    const table = readTable('Categories');
+    if (!keywordColumnsReady_(table)) throw new AppError('SETUP_ORDER', 'The Categories tab needs two new columns. Run setupSheets() once in the Apps Script editor.');
+    const rows = categoryRowsByName_(p.name);
+    name = String(rows[0].name).trim();
+    const want = Array.isArray(p.entityIds) && p.entityIds.length ? p.entityIds.map(x => String(x).toUpperCase()) : null;
+    targets = want ? rows.filter(r => want.indexOf(r.entity_id) !== -1) : rows;
+    if (!targets.length) throw new AppError('BAD_REQUEST', 'That company doesn’t have this category.');
+    const drop = (list) => splitKeywords_(list).filter(k => keys.indexOf(keywordKey_(k)) === -1);
+    const add = (list) => { const l = splitKeywords_(list); words.forEach((w, i) => { if (!l.some(k => keywordKey_(k) === keys[i])) l.push(w); }); return l; };
+
+    if (op === 'add') {
+      // The same word on two categories of one company would make the suggestion a coin toss.
+      targets.forEach(r => table.rows.forEach(o => {
+        if (o.entity_id !== r.entity_id || o.category_id === r.category_id) return;
+        const clash = splitKeywords_(o.keywords).find(k => keys.indexOf(keywordKey_(k)) !== -1);
+        if (clash) throw new AppError('KEYWORD_TAKEN', '“' + clash + '” is already a keyword of ' + o.name + ' in ' + entityById_(o.entity_id).short_name + '. Remove it there first.');
+      }));
+      targets.forEach(r => {
+        updateRowById('Categories', 'category_id', r.category_id, { keywords: add(r.keywords).join(', '), learned_keywords: drop(r.learned_keywords).join(', '), removed_keywords: drop(r.removed_keywords).join(', ') });
+        // Learned elsewhere in this company: the admin's choice wins at once (the nightly relearn agrees).
+        table.rows.filter(o => o.entity_id === r.entity_id && o.category_id !== r.category_id && splitKeywords_(o.learned_keywords).some(k => keys.indexOf(keywordKey_(k)) !== -1))
+          .forEach(o => updateRowById('Categories', 'category_id', o.category_id, { learned_keywords: drop(o.learned_keywords).join(', ') }));
+      });
+    } else {
+      targets.forEach(r => updateRowById('Categories', 'category_id', r.category_id, { keywords: drop(r.keywords).join(', '), learned_keywords: drop(r.learned_keywords).join(', '), removed_keywords: add(r.removed_keywords).join(', ') }));
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  auditLog({ userId: ctx.user.user_id, action: 'keywords.' + op, ref: name, ok: true, detail: { keywords: words, companies: targets.map(r => r.entity_id) } });
+  return { category: keywordsOverview_(name).categories[0] };
+}
+
+/** Switches one company's category on or off. On needs an active purchase account in that company's chart. */
+function actionSetCategoryActive_(req, ctx) {
+  requireAdmin_(ctx);
+  const id = str_(req.payload.categoryId, 60);
+  const on = req.payload.active === true;
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(PO_RULES.LOCK_WAIT_MS)) throw new AppError('BUSY', 'PO Desk is busy. Please try again.');
+  let row;
+  try {
+    invalidateTable_('Categories');
+    row = readTable('Categories').rows.find(r => String(r.category_id) === id && ENTITY_SEED.some(e => e.entity_id === r.entity_id));
+    if (!row) throw new AppError('NOT_FOUND', 'Category not found.');
+    if (on) {
+      const code = String(row.account_code || '');
+      if (!allowedFor_(row.entity_id)[code]) {
+        throw new AppError('NO_ACCOUNT', 'Account ' + (code || '(none)') + ' isn’t an active purchase account in ' + entityById_(row.entity_id).short_name + '. Fix account_code in the Categories tab first.');
+      }
+    }
+    updateRowById('Categories', 'category_id', id, { active: on });
+  } finally {
+    lock.releaseLock();
+  }
+  auditLog({ userId: ctx.user.user_id, entityId: row.entity_id, action: on ? 'category.on' : 'category.off', ref: String(row.name), ok: true, detail: { categoryId: id, accountCode: String(row.account_code || '') } });
+  return { category: keywordsOverview_(row.name).categories[0] };
+}
+
+/**
+ * What PO Desk would suggest for a description in one company (no supplier, no category), and which
+ * switched-off categories' keywords match it, so an admin sees what switching on would change.
+ */
+function actionTestKeywords_(req, ctx) {
+  requireAdmin_(ctx);
+  const ent = entityById_(req.payload.entityId).entity_id;
+  const desc = str_(req.payload.description, PO_RULES.MAX_DESCRIPTION);
+  if (!desc.trim()) throw new AppError('BAD_REQUEST', 'Type what is being bought.');
+  const data = codingData_(ent);
+  const s = suggestAccountWith_(data, ent, null, null, desc);
+  const tokens = keywordTokens_(desc);
+  const off = data.categories.filter(c => !isTrue_(c.active)).map(c => {
+    const hit = categoryKeywords_(c).filter(x => keywordMatches_(tokens, x.k)).sort((a, b) => b.k.length - a.k.length)[0];
+    return hit ? { name: String(c.name), keyword: hit.k } : null;
+  }).filter(Boolean);
+  return { accountCode: s.accountCode, accountName: s.accountName, source: s.source, reason: s.reason, needsReview: s.needsReview, switchedOff: off };
+}
+
+const IDEAS_SCHEMA = Object.freeze({
+  type: 'object',
+  properties: {
+    ideas: {
+      type: 'array',
+      items: { type: 'object', properties: { keyword: { type: 'string' }, why: { type: 'string' } }, required: ['keyword', 'why'] },
+    },
+  },
+  required: ['ideas'],
+});
+
+/**
+ * Keyword ideas from Gemini for one category, each checked against old bills and the other categories.
+ * Nothing is saved: the admin adds the good ones. payload: { name }.
+ */
+function actionKeywordIdeas_(req, ctx) {
+  requireAdmin_(ctx);
+  const rows = categoryRowsByName_(req.payload.name);
+  rateLimit_('ideas', ctx.user.user_id, 30, 3600);
+  const name = String(rows[0].name).trim();
+  const key = name.toLowerCase();
+  const all = readTable('Categories').rows.filter(r => ENTITY_SEED.some(e => e.entity_id === r.entity_id));
+  const allowed = {};
+  rows.forEach(r => { allowed[r.entity_id] = allowedFor_(r.entity_id); });
+  const accts = uniq_(rows.map(r => { const a = allowed[r.entity_id][String(r.account_code)]; return String(r.account_code || '') + (a ? ' ' + a.name : ''); }).filter(Boolean));
+  const mine = {};
+  rows.forEach(r => categoryKeywords_(r).forEach(x => { mine[keywordKey_(x.k)] = x.k; }));
+  const others = {};
+  all.forEach(r => {
+    const n = String(r.name || '').trim();
+    if (!n || n.toLowerCase() === key) return;
+    const o = others[n.toLowerCase()] || (others[n.toLowerCase()] = { name: n, kw: {} });
+    splitKeywords_(r.keywords).forEach(k => { o.kw[keywordKey_(k)] = k; });
+  });
+
+  const prompt = [
+    'PO Desk codes purchases by three South African companies (HP Biotech, NHP Global and Pharma Karu) to their charts of accounts.',
+    'Purchases are described by staff ("bleach for the factory floor") or printed on till slips in short capitals ("JIK REG 750ML", "HANDY ANDY CRM").',
+    'Suggest up to ' + KEYWORD_RULES.IDEAS_MAX + ' extra keywords for the category "' + name + '" (account ' + accts.join(' / ') + ').',
+    'Good keywords clearly mean this category on their own: product words, South African brand names and the abbreviations South African till slips use.',
+    'Avoid: words that could equally mean another category, pack or size words (refill, large, 750ml, pack), store names, and anything already listed.',
+    'Already keywords of this category: ' + (Object.keys(mine).map(k => mine[k]).join(', ') || '(none)') + '.',
+    'Other categories (do not suggest their words): ' + Object.keys(others).map(k => others[k].name + ' (' + Object.keys(others[k].kw).slice(0, 8).map(x => others[k].kw[x]).join(', ') + ')').join('; ') + '.',
+    'Return each keyword in lower case (one to three words) with a short reason of at most eight words.',
+  ].join('\n');
+  const r = geminiJson_(prompt, IDEAS_SCHEMA, { userId: ctx.user.user_id, ref: 'keyword-ideas:' + name });
+  if (!r.ok) throw new AppError('AI_UNAVAILABLE', r.message);
+
+  const ent = {};
+  rows.forEach(rw => { ent[rw.entity_id] = wordIndexFor_(rw.entity_id); });
+  const sources = rows.map(rw => ({ index: ent[rw.entity_id], code: String(rw.account_code || ''), allowed: allowed[rw.entity_id] }));
+  const seen = {};
+  const ideas = [];
+  ((r.data && r.data.ideas) || []).forEach(x => {
+    let k;
+    try { k = cleanKeyword_(x && x.keyword); } catch (err) { return; }
+    const kk = keywordKey_(k);
+    if (mine[kk] || seen[kk]) return;
+    seen[kk] = true;
+    const clash = Object.keys(others).find(o => others[o].kw[kk]);
+    ideas.push({ k: k, why: truncate_(String((x && x.why) || ''), 80), takenBy: clash ? others[clash].name : '', evidence: keywordEvidence_(k, sources) });
+  });
+  return { name: name, ideas: ideas.slice(0, KEYWORD_RULES.IDEAS_MAX) };
+}
+
+/** Editor: relearn every company's keywords from the word indexes now (the nightly sync does it at 02:00). */
+function learnKeywordsNow() {
+  const r = relearnAllKeywords_();
+  console.log('learnKeywordsNow ' + JSON.stringify(r, null, 2));
+  return r;
 }

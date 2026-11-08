@@ -53,7 +53,7 @@ COMPOSIO_API_KEY, COMPOSIO_XERO_ACCOUNT_ID, COMPOSIO_USER_ID (if the API needs i
 - Users(user_id, name, email, pin_hash, pin_salt, role [buyer|approver|admin], active, failed_attempts, locked_until, pin_token_hash, pin_token_expires, created_by, created_at, sessions_valid_from). Sessions started at or before sessions_valid_from are refused: set on deactivation and on every PIN link (Stage 7).
 - UserEntities(user_id, entity_id, can_buy, can_approve, po_limit_zar)
 - PaymentMethods(pm_id, entity_id, type [CARD|CASH], label, last4, holder_name, holder_user_id, xero_bank_account_id, xero_bank_account_name, active). Map by AccountID: these orgs' bank accounts have blank account codes.
-- Categories(category_id, entity_id, name, account_code, tax_type, keywords, sort, active)
+- Categories(category_id, entity_id, name, account_code, tax_type, keywords, sort, active, learned_keywords, removed_keywords). keywords: typed by admins; learned_keywords: rewritten by the nightly sync from old bills; removed_keywords: words an admin took off, never learned again (Stage 10).
 - Accounts(entity_id, account_id, code, name, type, class, tax_type, status, synced_at)
 - TaxRates(entity_id, tax_type, name, rate, status, synced_at)
 - Suppliers(entity_id, contact_id, name, vat_number, synced_at)
@@ -105,26 +105,28 @@ Xero's API has no field linking a bill to a PO; that link only exists when a bil
 ## Account coding engine (Coding.gs)
 suggestAccount(entityId, contactId, categoryId, description) returns { accountCode, taxType, source, reason }, trying in order:
 1. Supplier history: if this supplier's last N coded purchases in this company (Config, default 5) share one account code, use it.
-2. Keyword rules: Categories.keywords matched against the description (case-insensitive, whole words).
+2. Keyword rules: each switched-on category's keywords (the admins', then learned ones not removed) matched against the description as whole words with plurals folded ("mop" finds "MOPS"); the longest match wins, and an admin's keyword beats a learned one of the same length.
 3. Learned words (added 4 Nov 2026): the words of the description scored against this company's bill lines of the last 12 months plus open PO Desk POs, and the accounts they were coded to (rarer words weigh more; the winner needs 2+ lines and Config WORD_MIN_SHARE, default 0.6, of the evidence; the companies' own names are ignored). Backtest on NHP's real bills: right 37% → 59% overall; learned words right 89% of the time they suggest. A company may also borrow other companies' learned words (Config WORD_BORROW_<company>; PK borrows from HPB and NHP since it had 1 bill in 12 months), only for accounts with the same code and name in its own chart, after its own words.
 4. Category default: Categories.account_code for the chosen category.
 5. Fallback: Config DEFAULT_ACCOUNT_<entity>, flagged "needs review".
 Only return a code that is ACTIVE in that company's cached chart and valid for purchases. The buyer's final choice updates SupplierHistory. Categories and codes are per company because the three charts of accounts differ.
 
+Keywords screen (Stage 10, decided 8 Nov 2026; admins only): a category name is the same category in every company that has it. Admins switch it on or off per company (on needs an active purchase account in that company's chart; changes are logged), add keywords (all companies with that category by default, or one; several separated by commas; a word another category of that company already has is refused), and remove them. Learned keywords: the nightly sync makes a word a keyword of the category whose account got at least 90% of at least 3 old bill lines carrying it (own bills, then borrowed words; no numbers or pack/size words; at most 25 per category); admins can remove any, and removed words never come back unless typed in again. AI ideas: Gemini proposes brand names and slip wordings for a category, each shown with how old bills were coded; nothing is saved until an admin taps Add. A test box shows what PO Desk would suggest for a description in one company, and which switched-off categories would catch it. Account codes of categories are still edited in the Sheet.
+
 ## Security
 - Login: email + 6-digit PIN, stored as SHA-256(salt + PIN) via Utilities.computeDigest. Five failed attempts lock the account for 15 minutes.
 - Session token: Utilities.getUuid() held in CacheService (6-hour maximum), refreshed on use; the browser keeps it in sessionStorage.
 - Every action re-checks on the server that the user is still active, their role and their UserEntities; never trust the company the browser says it picked.
-- People are managed on the in-app People screen (admins only; built in Stage 7). Cards, cash floats and categories are edited in the Sheet for v1. Setup.gs keeps createUser() and setPin() only to bootstrap the first admin.
+- People are managed on the in-app People screen (admins only; built in Stage 7). Cards and cash floats are edited in the Sheet for v1; categories are switched on and their keywords managed on the Keywords screen (Stage 10), their account codes in the Sheet. Setup.gs keeps createUser() and setPin() only to bootstrap the first admin.
 - PINs are always chosen by the person through an emailed single-use link (48-hour expiry, token stored only as a hash). Admins never see or set anyone's PIN. A PIN reset clears the old PIN at once and ends the person's open sessions.
-- Scheduled jobs (Setup.gs installTriggers): nightlySync 02:00, processQueue every 5 minutes (queue and approval reminders), dailyDigest 08:00 to admins. Each copes with its trigger being installed twice.
+- Scheduled jobs (Setup.gs installTriggers): nightlySync 02:00 (also relearns keywords), processQueue every 5 minutes (queue and approval reminders), dailyDigest 08:00 to admins. Each copes with its trigger being installed twice.
 - Rate-limit logins and PO creation per user.
 
 ## UI and branding
 - Mobile-first, one-handed, large tap targets; must work in Android Chrome and iOS Safari.
 - Brand colours and logos come from /frontend/brand/brands.json; follow its notes on which colours are safe for small text.
 - The shell is Pharma Karu-branded (the host). Keep a BRANDS map keyed by entity and by hostname, so more subdomains can be added later. Once a company is chosen, the header logo and accent switch to it and a fixed bar reads "Buying for: <company>", so nobody posts to the wrong books.
-- Screens: Login, Company picker, Home (New PO, Add slip, My POs with status chips), New PO, PO issued, Slip capture, Slip review, Approvals (approvers only), Set PIN, People (admins only).
+- Screens: Login, Company picker, Home (New PO, Add slip, My POs with status chips), New PO, PO issued, Slip capture, Slip review, Approvals (approvers only), Set PIN, People (admins only), Keywords (admins only).
 - Plain language. Amounts in rand with two decimals; dates like 3 Nov 2026.
 
 ## Code standards

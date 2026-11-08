@@ -1,4 +1,4 @@
-// Home: the main actions for the chosen company, plus Approvals (approvers) and People (admins).
+// Home: the main actions for the chosen company, plus Approvals (approvers), People and Keywords (admins).
 import { h, icon, alertBox } from './ui.js';
 import { call } from '../api.js';
 
@@ -8,6 +8,7 @@ const ICONS = {
   list: ['M8 6h13', 'M8 12h13', 'M8 18h13', 'M3 6h.01', 'M3 12h.01', 'M3 18h.01'],
   approve: ['M9 12l2 2 4-4', 'M12 3l7 4v5c0 4.5-3 8-7 9-4-1-7-4.5-7-9V7z'],
   people: ['M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1', 'M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M22 19v-1a4 4 0 0 0-3-3.87', 'M16 4.13a3 3 0 0 1 0 5.74'],
+  tag: ['M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z', 'M7.5 7.5h.01'],
 };
 
 export function render(root, ctx) {
@@ -50,7 +51,10 @@ export function render(root, ctx) {
       if (sub) sub.textContent = r.items.length ? `${r.items.length} waiting for you` : 'Nothing waiting';
     }).catch(() => {});
   }
-  if (me.isAdmin) tiles.push(tile('People', 'Who can buy and approve', ICONS.people, () => ctx.go('/people')));
+  if (me.isAdmin) {
+    tiles.push(tile('People', 'Who can buy and approve', ICONS.people, () => ctx.go('/people')));
+    tiles.push(tile('Keywords', 'Categories and their words', ICONS.tag, () => ctx.go('/keywords')));
+  }
   if (tiles.length) root.append(h('div', { class: 'mt-6 grid grid-cols-2 gap-3' }, tiles));
   root.append(notice);
 

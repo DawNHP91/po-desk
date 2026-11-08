@@ -10,7 +10,9 @@ const TABLES = Object.freeze({
   Users: ['user_id', 'name', 'email', 'pin_hash', 'pin_salt', 'role', 'active', 'failed_attempts', 'locked_until', 'pin_token_hash', 'pin_token_expires', 'created_by', 'created_at', 'sessions_valid_from'],
   UserEntities: ['user_id', 'entity_id', 'can_buy', 'can_approve', 'po_limit_zar'],
   PaymentMethods: ['pm_id', 'entity_id', 'type', 'label', 'last4', 'holder_name', 'holder_user_id', 'xero_bank_account_id', 'xero_bank_account_name', 'active'],
-  Categories: ['category_id', 'entity_id', 'name', 'account_code', 'tax_type', 'keywords', 'sort', 'active'],
+  // keywords: typed by admins (Keywords screen or this Sheet). learned_keywords: rewritten by the nightly sync
+  // from old bills. removed_keywords: words an admin took off, so learning never adds them back (Stage 10).
+  Categories: ['category_id', 'entity_id', 'name', 'account_code', 'tax_type', 'keywords', 'sort', 'active', 'learned_keywords', 'removed_keywords'],
   Accounts: ['entity_id', 'account_id', 'code', 'name', 'type', 'class', 'tax_type', 'status', 'synced_at'],
   TaxRates: ['entity_id', 'tax_type', 'name', 'rate', 'status', 'synced_at'],
   Suppliers: ['entity_id', 'contact_id', 'name', 'vat_number', 'synced_at'],

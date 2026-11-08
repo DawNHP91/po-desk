@@ -171,7 +171,7 @@ check('Gemini request: inline JPEG, temperature 0, JSON schema, key in header (n
 check('no CLAUDE.md flags for a clean slip matching the PO (the fixture slip is dated 4 Nov 2026, so a date gap is expected on later days)', rd.data.flags.filter(x => x.code !== 'DATE_GAP').length === 0, JSON.stringify(rd.data.flags));
 
 // read: every failure becomes "manual", with the PO supplier prefilled
-[['429 quota', '429', /allowance/], ['outage (500 twice)', '500', /unavailable/], ['blocked answer', 'blocked', /could not be read/], ['unparseable JSON', 'badjson', /could not be read/]].forEach(t => {
+[['429 quota', '429', /reached its limit/], ['outage (500 twice)', '500', /unavailable/], ['blocked answer', 'blocked', /could not be read/], ['unparseable JSON', 'badjson', /could not be read/]].forEach(t => {
   setGemini(t[1]);
   const r = call('readSlip', { billId: up.data.billId });
   check('readSlip ' + t[0] + ' -> manual, buyer types (supplier prefilled)', r.ok && r.data.status === 'manual' && t[2].test(r.data.reason) && r.data.fields.supplierName === 'Engen Rainbow Motors' && r.data.fields.totalIncl === null, JSON.stringify(r).slice(0, 250));

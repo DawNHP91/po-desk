@@ -82,7 +82,9 @@ function syncAllNow_() {
     }
   });
 
-  const summary = { totalMs: Date.now() - started, composioCalls: composioStats_.calls - callsBefore, results: results };
+  // Keywords learned from old bills, once every company's words are fresh (PK borrows HPB's and NHP's).
+  const learnedKeywords = relearnAllKeywords_();
+  const summary = { totalMs: Date.now() - started, composioCalls: composioStats_.calls - callsBefore, results: results, learnedKeywords: learnedKeywords };
   PropertiesService.getScriptProperties().setProperty('SYNC_LAST', JSON.stringify({ at: new Date().toISOString(), summary: summary }));
   auditLog({ action: 'sync.all', ok: results.length === ENTITY_SEED.length && results.every(r => r.ok), detail: summary });
   console.log('syncAll ' + JSON.stringify(summary, null, 2));

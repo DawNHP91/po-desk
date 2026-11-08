@@ -36,6 +36,12 @@ const ROUTES = {
   setPersonActive: { tabs: AUTH_TABS, fn: (req, ctx) => actionSetPersonActive_(req, ctx) },
   checkPinToken: { public: true, tabs: AUTH_TABS, fn: (req) => actionCheckPinToken_(req) },
   setPinWithToken: { public: true, tabs: AUTH_TABS, fn: (req) => actionSetPinWithToken_(req) },
+  // Stage 10: categories and their keywords (admins only; Coding.gs).
+  listKeywords: { tabs: AUTH_TABS.concat(['Categories']), fn: (req, ctx) => actionListKeywords_(req, ctx) },
+  saveKeyword: { tabs: AUTH_TABS.concat(['Categories']), fn: (req, ctx) => actionSaveKeyword_(req, ctx) },
+  setCategoryActive: { tabs: AUTH_TABS.concat(['Categories']), fn: (req, ctx) => actionSetCategoryActive_(req, ctx) },
+  testKeywords: { tabs: AUTH_TABS.concat(['Categories', 'SupplierHistory']), fn: (req, ctx) => actionTestKeywords_(req, ctx) },
+  keywordIdeas: { tabs: AUTH_TABS.concat(['Categories']), fn: (req, ctx) => actionKeywordIdeas_(req, ctx) },
 };
 
 const PO_STATUS = Object.freeze({

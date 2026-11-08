@@ -141,7 +141,7 @@ function extractSlipFromBlob_(blob, ctx) {
     const code = res.getResponseCode();
     if (code === 200) break;
     const text = res.getContentText();
-    if (code === 429) return manual('The free slip-reading allowance is used up for now.', { http: 429, attempts: attempt });
+    if (code === 429) return manual('Slip reading has reached its limit for now.', { http: 429, attempts: attempt });
     // Older API versions only know the OpenAPI-style schema: retry once in that form.
     if (code === 400 && !schemaFallback && /response_?json_?schema|responseJsonSchema/i.test(text)) {
       schemaFallback = true;
@@ -171,6 +171,50 @@ function extractSlipFromBlob_(blob, ctx) {
   const out = Object.assign({ status: 'ok', reason: '', model: model, ms: Date.now() - t0, attempts: attempt }, n);
   auditLog({ userId: ctx.userId, entityId: ctx.entityId, action: 'ocr.extract', ref: ctx.ref, ok: true, detail: { model: model, ms: out.ms, attempts: attempt, low: n.lowConfidence, checks: n.checks.map(c => c.code), schemaFallback: schemaFallback || undefined } });
   return out;
+}
+
+/**
+ * A text-only Gemini request with a strict JSON answer (Stage 10: keyword ideas), on the same model and
+ * key as slip reading. Returns { ok: true, data } or { ok: false, message }; never throws.
+ */
+function geminiJson_(prompt, schema, ctx) {
+  ctx = ctx || {};
+  const t0 = Date.now();
+  const model = String(getConfig('GEMINI_MODEL', 'gemini-3.6-flash'));
+  const fail = (message, extra) => {
+    auditLog({ userId: ctx.userId, action: 'ai.json', ref: ctx.ref, ok: false, detail: Object.assign({ model: model, ms: Date.now() - t0, message: message }, extra || {}) });
+    return { ok: false, message: message };
+  };
+  const key = getOptionalSecret_('GEMINI_API_KEY');
+  if (!key) return fail('AI is not set up yet (no Gemini key).');
+  const body = { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.2, responseMimeType: 'application/json', responseJsonSchema: schema } };
+  const url = OCR.BASE + encodeURIComponent(model) + ':generateContent';
+  let res = null;
+  for (let attempt = 1; attempt <= OCR.MAX_ATTEMPTS; attempt++) {
+    try {
+      res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': key }, payload: JSON.stringify(body), muteHttpExceptions: true });
+    } catch (err) {
+      res = null;
+      if (attempt < OCR.MAX_ATTEMPTS) { Utilities.sleep(1500); continue; }
+      return fail('The AI could not be reached. Try again.');
+    }
+    const code = res.getResponseCode();
+    if (code === 200) break;
+    if (code === 429) return fail('The AI is busy. Try again in a minute.', { http: 429 });
+    if (code >= 500 && attempt < OCR.MAX_ATTEMPTS) { Utilities.sleep(1500); continue; }
+    return fail('The AI is unavailable right now. Try again later.', { http: code, error: geminiError_(res.getContentText()) });
+  }
+  let data;
+  try {
+    const json = JSON.parse(res.getContentText());
+    const cand = (json.candidates || [])[0];
+    if (!cand || (cand.finishReason && cand.finishReason !== 'STOP')) throw new Error('no usable answer');
+    data = JSON.parse(((cand.content && cand.content.parts) || []).map(p => p.text || '').join(''));
+  } catch (err) {
+    return fail('The AI gave an answer PO Desk could not use. Try again.');
+  }
+  auditLog({ userId: ctx.userId, action: 'ai.json', ref: ctx.ref, ok: true, detail: { model: model, ms: Date.now() - t0 } });
+  return { ok: true, data: data };
 }
 
 /**
